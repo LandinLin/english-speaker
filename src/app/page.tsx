@@ -1,69 +1,260 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+interface ChatMessage {
+  role: "user" | "ai";
+  text: string;
+  praise?: string;
+  correction?: string;
+  newWord?: string;
+}
+
+interface ConversationResponse {
+  transcript?: string;
+  aiText?: string;
+  feedback?: {
+    praise?: string;
+    correction?: string;
+    newWord?: string;
+  };
+  audioBase64?: string;
+  error?: string;
+}
+
+type Status = "idle" | "recording" | "processing";
+
+const HISTORY_LIMIT = 4;
+// Ignore synthetic mouse events fired right after touch events on mobile.
+const TOUCH_MOUSE_GRACE_MS = 800;
 
 export default function Home() {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [status, setStatus] = useState<Status>("idle");
+
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const lastTouchAtRef = useRef(0);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, status]);
+
+  const submitRecording = async () => {
+    const blob = new Blob(chunksRef.current, {
+      type: chunksRef.current[0]?.type || "audio/webm",
+    });
+    chunksRef.current = [];
+    mediaRecorderRef.current = null;
+
+    if (blob.size === 0) {
+      setStatus("idle");
+      return;
+    }
+
+    const history = messagesRef.current
+      .slice(-HISTORY_LIMIT)
+      .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.text }));
+
+    const formData = new FormData();
+    formData.append("audio", new File([blob], "speech.webm", { type: blob.type }));
+    formData.append("history", JSON.stringify(history));
+
+    try {
+      const res = await fetch("/api/conversation", {
+        method: "POST",
+        body: formData,
+      });
+      const data: ConversationResponse = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `Request failed (${res.status})`);
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        { role: "user", text: data.transcript ?? "" },
+        {
+          role: "ai",
+          text: data.aiText ?? "",
+          praise: data.feedback?.praise,
+          correction: data.feedback?.correction,
+          newWord: data.feedback?.newWord,
+        },
+      ]);
+
+      if (data.audioBase64) {
+        const audio = new Audio(`data:audio/mpeg;base64,${data.audioBase64}`);
+        void audio.play().catch(() => {});
+      }
+    } catch (err) {
+      console.error("💥 [page] Conversation failed:", err);
+      setMessages((prev) => [
+        ...prev,
+        { role: "ai", text: "Oops! Something went wrong. Let's try again!" },
+      ]);
+    } finally {
+      setStatus("idle");
+    }
+  };
+
+  const startRecording = async () => {
+    if (status !== "idle") return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      chunksRef.current = [];
+
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : undefined;
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        void submitRecording();
+      };
+      recorder.start();
+
+      mediaRecorderRef.current = recorder;
+      setStatus("recording");
+    } catch (err) {
+      console.error("🎤 [page] Microphone access failed:", err);
+      setStatus("idle");
+    }
+  };
+
+  const stopRecording = () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") return;
+    setStatus("processing");
+    recorder.stop();
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  };
+
+  // Release outside the button should also stop recording.
+  useEffect(() => {
+    if (status !== "recording") return;
+    const handleUp = () => stopRecording();
+    window.addEventListener("mouseup", handleUp);
+    window.addEventListener("touchend", handleUp);
+    return () => {
+      window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("touchend", handleUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
+
+  const handleStartMouse = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (Date.now() - lastTouchAtRef.current < TOUCH_MOUSE_GRACE_MS) return;
+    void startRecording();
+  };
+
+  const handleStartTouch = () => {
+    lastTouchAtRef.current = Date.now();
+    void startRecording();
+  };
+
+  const handleStopMouse = () => {
+    if (Date.now() - lastTouchAtRef.current < TOUCH_MOUSE_GRACE_MS) return;
+    stopRecording();
+  };
+
+  const handleStopTouch = () => {
+    lastTouchAtRef.current = Date.now();
+    stopRecording();
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="flex h-dvh flex-col bg-gradient-to-b from-blue-50 to-purple-50">
+      {/* Header */}
+      <header className="pt-8 pb-4 text-center">
+        <h1 className="text-3xl font-bold text-gray-800">🎤 English Buddy</h1>
+        <p className="mt-1 text-sm text-gray-500">Press and hold to speak</p>
+      </header>
+
+      {/* Chat list */}
+      <div className="flex-1 overflow-y-auto px-4 pb-32">
+        <div className="mx-auto flex max-w-xl flex-col gap-3">
+          {messages.length === 0 && (
+            <div className="flex flex-col items-start gap-1">
+              <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-800 shadow">
+                Hi! I&apos;m English Buddy. Press and hold the button below, then
+                say &quot;Hello!&quot; 👋
+              </div>
+            </div>
+          )}
+
+          {messages.map((message, index) =>
+            message.role === "user" ? (
+              <div key={index} className="flex justify-end">
+                <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-blue-500 px-4 py-2 text-white shadow">
+                  {message.text}
+                </div>
+              </div>
+            ) : (
+              <div key={index} className="flex flex-col items-start gap-1">
+                <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-800 shadow">
+                  {message.text}
+                </div>
+                {(message.praise || message.correction || message.newWord) && (
+                  <div className="max-w-[80%] space-y-0.5 px-1 text-xs text-gray-500">
+                    {message.praise && message.praise !== "None" && (
+                      <p>✅ {message.praise}</p>
+                    )}
+                    {message.correction && message.correction !== "None" && (
+                      <p>✏️ {message.correction}</p>
+                    )}
+                    {message.newWord && message.newWord !== "None" && (
+                      <p>💡 {message.newWord}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          )}
+
+          {status === "processing" && (
+            <div className="flex flex-col items-start gap-1">
+              <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-400 shadow">
+                Thinking…
+              </div>
+            </div>
+          )}
+
+          <div ref={bottomRef} />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      </div>
+
+      {/* Record button */}
+      <button
+        type="button"
+        aria-label="Press and hold to speak"
+        disabled={status === "processing"}
+        onMouseDown={handleStartMouse}
+        onMouseUp={handleStopMouse}
+        onTouchStart={handleStartTouch}
+        onTouchEnd={handleStopTouch}
+        onContextMenu={(e) => e.preventDefault()}
+        className={`fixed bottom-8 left-1/2 z-10 flex h-20 w-20 -translate-x-1/2 touch-none select-none items-center justify-center rounded-full text-3xl shadow-xl transition-all duration-200 ${
+          status === "recording"
+            ? "scale-125 bg-red-500 text-white"
+            : status === "processing"
+              ? "bg-gray-400 text-white"
+              : "bg-blue-500 text-white hover:bg-blue-600"
+        }`}
+      >
+        {status === "processing" ? "⏳" : "🎤"}
+      </button>
+    </main>
   );
 }
