@@ -30,11 +30,15 @@ export interface Session {
   messages: ChatMessage[];
 }
 
-const MESSAGES_KEY = "english-buddy:messages";
+/** Canonical storage: grouped, versioned sessions. */
+const SESSIONS_KEY = "english-buddy:sessions";
+/** Older app versions kept a flat message list here; migrated on first load. */
+const LEGACY_MESSAGES_KEY = "english-buddy:messages";
 const PENDING_KEY = "english-buddy:pending-new-session";
 // A gap longer than this automatically starts a new conversation session.
 const SESSION_GAP_MS = 30 * 60 * 1000;
 const LEGACY_SESSION_ID = "legacy-conversation";
+const STORAGE_VERSION = 1;
 
 const EMPTY: ChatMessage[] = [];
 const FALSE = false;
@@ -63,26 +67,93 @@ function isValidMessage(m: unknown): m is ChatMessage {
   );
 }
 
+function normalizeMessage(
+  m: unknown,
+  index: number,
+  fallbackSessionId = LEGACY_SESSION_ID,
+  fallbackTime = Date.now()
+): ChatMessage | null {
+  if (!isValidMessage(m)) return null;
+  return {
+    id: typeof m.id === "string" ? m.id : uid(),
+    sessionId:
+      typeof m.sessionId === "string" ? m.sessionId : fallbackSessionId,
+    createdAt:
+      typeof m.createdAt === "number" ? m.createdAt : fallbackTime + index,
+    role: m.role,
+    text: m.text,
+    ...(m.praise !== undefined ? { praise: m.praise } : {}),
+    ...(m.correction !== undefined ? { correction: m.correction } : {}),
+    ...(m.newWord !== undefined ? { newWord: m.newWord } : {}),
+    ...(m.audioBase64 !== undefined ? { audioBase64: m.audioBase64 } : {}),
+  };
+}
+
+/** Flatten any accepted on-disk shape into the ordered flat message list. */
+function flattenStored(parsed: unknown): ChatMessage[] {
+  const now = Date.now();
+  const hasEnvelope =
+    parsed !== null &&
+    typeof parsed === "object" &&
+    Array.isArray((parsed as { sessions?: unknown }).sessions);
+  const rawSessions: unknown[] = hasEnvelope
+    ? ((parsed as { sessions: unknown[] }).sessions)
+    : Array.isArray(parsed)
+      ? (parsed as unknown[])
+      : [];
+
+  const out: ChatMessage[] = [];
+  rawSessions.forEach((entry) => {
+    if (!entry || typeof entry !== "object") return;
+    const group = entry as {
+      id?: unknown;
+      startedAt?: unknown;
+      messages?: unknown;
+    };
+    if (Array.isArray(group.messages)) {
+      // Grouped session shape: { id, startedAt, messages: [...] }
+      const sessionId =
+        typeof group.id === "string" ? group.id : LEGACY_SESSION_ID;
+      const startedAt =
+        typeof group.startedAt === "number" ? group.startedAt : now;
+      group.messages.forEach((m, i) => {
+        const normalized = normalizeMessage(m, i, sessionId, startedAt);
+        if (normalized) out.push(normalized);
+      });
+    } else {
+      // Legacy flat message shape
+      const normalized = normalizeMessage(entry, out.length);
+      if (normalized) out.push(normalized);
+    }
+  });
+  return out.sort((a, b) => a.createdAt - b.createdAt);
+}
+
 /** Load + migrate messages saved by older versions of the app. */
 function loadMessages(): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(MESSAGES_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const now = Date.now();
-    return parsed.filter(isValidMessage).map((m, index) => ({
-      id: typeof m.id === "string" ? m.id : uid(),
-      sessionId:
-        typeof m.sessionId === "string" ? m.sessionId : LEGACY_SESSION_ID,
-      createdAt: typeof m.createdAt === "number" ? m.createdAt : now + index,
-      role: m.role,
-      text: m.text,
-      ...(m.praise !== undefined ? { praise: m.praise } : {}),
-      ...(m.correction !== undefined ? { correction: m.correction } : {}),
-      ...(m.newWord !== undefined ? { newWord: m.newWord } : {}),
-      ...(m.audioBase64 !== undefined ? { audioBase64: m.audioBase64 } : {}),
-    }));
+    const raw = localStorage.getItem(SESSIONS_KEY);
+    let migratedFromLegacy = false;
+    let parsed: unknown = null;
+
+    if (raw) {
+      parsed = JSON.parse(raw);
+    } else {
+      const legacyRaw = localStorage.getItem(LEGACY_MESSAGES_KEY);
+      if (legacyRaw) {
+        parsed = JSON.parse(legacyRaw);
+        migratedFromLegacy = true;
+      }
+    }
+    if (parsed === null) return [];
+
+    const messages = flattenStored(parsed);
+    if (migratedFromLegacy && messages.length > 0) {
+      // One-time migration: write the grouped format to the new key.
+      persist(messages);
+      localStorage.removeItem(LEGACY_MESSAGES_KEY);
+    }
+    return messages;
   } catch {
     return [];
   }
@@ -107,6 +178,8 @@ function getPendingSnapshot(): boolean {
 }
 
 function subscribe(listener: () => void): () => void {
+  // First client subscription triggers the one-time server sync.
+  if (typeof window !== "undefined") serverSync();
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
@@ -137,15 +210,115 @@ function emit(): void {
   listeners.forEach((listener) => listener());
 }
 
+// ---------------------------------------------------------------------------
+// Server sync (SQLite via /api/messages).
+// localStorage stays as an instant-read cache; the database is the durable
+// source of truth. All mutations optimistically update the cache and are then
+// pushed to the server fire-and-forget.
+// ---------------------------------------------------------------------------
+
+let syncStarted = false;
+
+function serverSync(): void {
+  if (syncStarted) return;
+  syncStarted = true;
+  void (async () => {
+    try {
+      const res = await fetch("/api/messages", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: { messages?: ChatMessage[] } = await res.json();
+      const serverMessages = Array.isArray(data.messages)
+        ? data.messages
+        : [];
+      const local = getMessagesSnapshot();
+
+      if (serverMessages.length === 0) {
+        // Fresh database: push whatever exists locally (also covers the
+        // legacy localStorage migration path) so it is never lost again.
+        if (local.length > 0) serverPost(local);
+        return;
+      }
+
+      // Union-merge by id: server content wins, but keep local-only messages
+      // (written while offline) and locally cached audio clips.
+      const byId = new Map<string, ChatMessage>();
+      for (const m of local) byId.set(m.id, m);
+      for (const m of serverMessages) {
+        const existing = byId.get(m.id);
+        byId.set(
+          m.id,
+          existing
+            ? { ...m, audioBase64: existing.audioBase64 ?? m.audioBase64 }
+            : m
+        );
+      }
+      const merged = [...byId.values()].sort(
+        (a, b) => a.createdAt - b.createdAt
+      );
+      const changed =
+        merged.length !== local.length ||
+        merged.some((m, i) => m !== local[i]);
+      if (changed) {
+        persist(merged);
+        emit();
+      }
+    } catch (err) {
+      console.error("🗄️ [store] Initial sync from server failed:", err);
+    }
+  })();
+}
+
+function serverPost(messages: ChatMessage[]): void {
+  void fetch("/api/messages", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages }),
+  }).catch((err) => {
+    console.error("🗄️ [store] Server save failed:", err);
+  });
+}
+
+function serverDelete(sessionId?: string): void {
+  const url = sessionId
+    ? `/api/messages?sessionId=${encodeURIComponent(sessionId)}`
+    : "/api/messages";
+  void fetch(url, { method: "DELETE" }).catch((err) => {
+    console.error("🗄️ [store] Server delete failed:", err);
+  });
+}
+
+function serverPatchAudio(id: string, audioBase64: string): void {
+  void fetch("/api/messages", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, audioBase64 }),
+  }).catch((err) => {
+    console.error("🗄️ [store] Server audio update failed:", err);
+  });
+}
+
 /**
- * Persist messages. If localStorage is full, voice clips of the OLDEST AI
- * messages are dropped first (text/feedback always survive), then retry.
+ * Persist grouped sessions. If localStorage is full, voice clips of the
+ * OLDEST AI messages are dropped first (text/feedback always survive), then
+ * retry.
  */
 function persist(next: ChatMessage[]): void {
   let data = next;
+  const write = (messages: ChatMessage[]): void => {
+    const sessions = selectSessions(messages).map((s) => ({
+      id: s.id,
+      startedAt: s.startedAt,
+      messages: s.messages,
+    }));
+    localStorage.setItem(
+      SESSIONS_KEY,
+      JSON.stringify({ version: STORAGE_VERSION, sessions })
+    );
+  };
+
   for (;;) {
     try {
-      localStorage.setItem(MESSAGES_KEY, JSON.stringify(data));
+      write(data);
       cachedMessages = data;
       return;
     } catch (err) {
@@ -155,7 +328,7 @@ function persist(next: ChatMessage[]): void {
       if (!quotaError) {
         // Still keep in-memory state consistent even if writing failed.
         cachedMessages = data;
-        console.error("💾 [store] Failed to persist messages:", err);
+        console.error("💾 [store] Failed to persist sessions:", err);
         return;
       }
       const oldestWithAudio = data.findIndex(
@@ -226,6 +399,7 @@ export function addExchange(input: ExchangeInput): {
   };
   persist([...getMessagesSnapshot(), user, ai]);
   emit();
+  serverPost([user, ai]);
   return { user, ai };
 }
 
@@ -246,6 +420,7 @@ export function appendNotice(text: string): void {
   };
   persist([...messages, notice]);
   emit();
+  serverPost([notice]);
 }
 
 export function beginNewSession(): void {
@@ -257,6 +432,7 @@ export function clearAllMessages(): void {
   persist([]);
   markPending(false);
   emit();
+  serverDelete();
 }
 
 export function deleteSession(sessionId: string): void {
@@ -264,6 +440,7 @@ export function deleteSession(sessionId: string): void {
     getMessagesSnapshot().filter((m) => m.sessionId !== sessionId)
   );
   emit();
+  serverDelete(sessionId);
 }
 
 /** Cache a lazily re-fetched voice clip back onto its message. */
@@ -274,6 +451,7 @@ export function setMessageAudio(id: string, audioBase64: string): void {
     )
   );
   emit();
+  serverPatchAudio(id, audioBase64);
 }
 
 /** Group the flat message list into sessions, oldest first. */

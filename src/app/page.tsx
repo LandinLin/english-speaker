@@ -12,6 +12,8 @@ import {
   usePendingNewSession,
 } from "@/lib/messageStore";
 import { playClip, stopPlayback } from "@/lib/audioPlayer";
+import { computeStats } from "@/lib/stats";
+import { countEarnedBadges } from "@/lib/badges";
 
 interface ConversationResponse {
   transcript?: string;
@@ -58,6 +60,12 @@ export default function Home() {
   // Keep the latest few messages available for the API history parameter.
   const historyRef = useRef<{ role: "user" | "assistant"; content: string }[]>(
     []
+  );
+
+  const stats = useMemo(() => computeStats(allMessages), [allMessages]);
+  const earnedBadgeCount = useMemo(
+    () => countEarnedBadges(stats.sessions),
+    [stats.sessions]
   );
   useEffect(() => {
     historyRef.current = allMessages.slice(-HISTORY_LIMIT).map((m) => ({
@@ -213,10 +221,25 @@ export default function Home() {
   return (
     <main className="flex h-dvh flex-col bg-gradient-to-b from-blue-50 to-purple-50">
       {/* Header */}
-      <header className="relative px-4 pt-8 pb-4 text-center">
+      <header className="px-3 pt-6 pb-3 text-center">
         <h1 className="text-3xl font-bold text-gray-800">🎤 English Buddy</h1>
-        <p className="mt-1 text-sm text-gray-500">Press and hold to speak</p>
-        <div className="absolute right-3 top-7 flex items-center gap-1.5">
+        <div className="mt-2 flex items-center justify-center gap-2 text-xs font-semibold">
+          <span className="rounded-full bg-white px-2.5 py-1 text-orange-500 shadow-sm">
+            🔥 {stats.currentStreak}-day streak
+          </span>
+          <span className="rounded-full bg-white px-2.5 py-1 text-amber-500 shadow-sm">
+            🏆 {earnedBadgeCount}{" "}
+            {earnedBadgeCount === 1 ? "badge" : "badges"}
+          </span>
+        </div>
+        <p className="mt-2 text-sm text-gray-500">Press and hold to speak</p>
+        <nav className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+          <Link
+            href="/dashboard"
+            className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-100"
+          >
+            📊 Dashboard
+          </Link>
           <Link
             href="/history"
             className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-100"
@@ -234,12 +257,13 @@ export default function Home() {
             <button
               type="button"
               onClick={handleClearAll}
+              aria-label="Delete all conversations"
               className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-100"
             >
               🗑️
             </button>
           )}
-        </div>
+        </nav>
       </header>
 
       {/* Chat list */}
