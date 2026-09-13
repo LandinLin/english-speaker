@@ -1,6 +1,9 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
+import OfflineBanner from "@/components/OfflineBanner";
+import OfflineQueueDrain from "@/components/OfflineQueueDrain";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,8 +17,28 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "English Buddy",
-  description: "A friendly English speaking tutor for kids",
+  description: "Practice English speaking with AI",
   manifest: "/manifest.json",
+  applicationName: "English Buddy",
+  appleWebApp: {
+    capable: true,
+    title: "English Buddy",
+    statusBarStyle: "default",
+  },
+  icons: {
+    icon: [
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#3b82f6",
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -24,7 +47,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        <OfflineBanner />
+        <OfflineQueueDrain />
+        <ServiceWorkerRegister />
+      </body>
     </html>
   );
 }

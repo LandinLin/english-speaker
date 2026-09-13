@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatTranscript from "@/components/ChatTranscript";
+import InstallPrompt from "@/components/InstallPrompt";
 import {
   addExchange,
   appendNotice,
@@ -12,6 +13,7 @@ import {
   usePendingNewSession,
 } from "@/lib/messageStore";
 import { playClip, stopPlayback } from "@/lib/audioPlayer";
+import { enqueueExchange } from "@/lib/offlineQueue";
 import { computeStats } from "@/lib/stats";
 import { countEarnedBadges } from "@/lib/badges";
 
@@ -78,6 +80,32 @@ export default function Home() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [visibleMessages, status]);
 
+  // Shared by live responses and responses drained from the offline outbox.
+  const applyExchange = useCallback((data: ConversationResponse) => {
+    const { ai } = addExchange({
+      transcript: data.transcript ?? "",
+      aiText: data.aiText ?? "",
+      praise: data.feedback?.praise,
+      correction: data.feedback?.correction,
+      newWord: data.feedback?.newWord,
+      audioBase64: data.audioBase64,
+    });
+    if (ai.audioBase64) {
+      playClip(ai.id, `data:audio/mpeg;base64,${ai.audioBase64}`);
+    }
+  }, []);
+
+  // Offline queue was drained by OfflineQueueDrain after reconnecting.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const data = (event as CustomEvent<ConversationResponse>).detail;
+      if (data) applyExchange(data);
+    };
+    window.addEventListener("english-buddy:exchange", handler);
+    return () =>
+      window.removeEventListener("english-buddy:exchange", handler);
+  }, [applyExchange]);
+
   const submitRecording = async () => {
     const blob = new Blob(chunksRef.current, {
       type: chunksRef.current[0]?.type || "audio/webm",
@@ -87,6 +115,22 @@ export default function Home() {
 
     if (blob.size === 0) {
       setStatus("idle");
+      return;
+    }
+
+    // Recorded while offline: park the audio in IndexedDB; the outbox drains
+    // automatically and the answer arrives via the event listener above.
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      try {
+        await enqueueExchange(blob, historyRef.current);
+        appendNotice(
+          "📴 Saved! I'll answer as soon as you're back online."
+        );
+      } catch {
+        appendNotice("Oops! Couldn't save that. Please try again!");
+      } finally {
+        setStatus("idle");
+      }
       return;
     }
 
@@ -106,20 +150,7 @@ export default function Home() {
       if (!res.ok || data.error) {
         throw new Error(data.error || `Request failed (${res.status})`);
       }
-
-      const { ai } = addExchange({
-        transcript: data.transcript ?? "",
-        aiText: data.aiText ?? "",
-        praise: data.feedback?.praise,
-        correction: data.feedback?.correction,
-        newWord: data.feedback?.newWord,
-        audioBase64: data.audioBase64,
-      });
-
-      // Respond by voice immediately.
-      if (ai.audioBase64) {
-        playClip(ai.id, `data:audio/mpeg;base64,${ai.audioBase64}`);
-      }
+      applyExchange(data);
     } catch (err) {
       console.error("💥 [page] Conversation failed:", err);
       appendNotice("Oops! Something went wrong. Let's try again!");
@@ -312,6 +343,8 @@ export default function Home() {
       >
         {status === "processing" ? "⏳" : "🎤"}
       </button>
+
+      <InstallPrompt />
     </main>
   );
 }
