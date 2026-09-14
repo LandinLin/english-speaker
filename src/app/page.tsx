@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatTranscript from "@/components/ChatTranscript";
 import InstallPrompt from "@/components/InstallPrompt";
@@ -35,10 +36,18 @@ const HISTORY_LIMIT = 4;
 // Ignore synthetic mouse events fired right after touch events on mobile.
 const TOUCH_MOUSE_GRACE_MS = 800;
 
+// The D-ID SDK is heavy and browser-only — load the overlay (and its SDK)
+// only when the child actually opens the video call.
+const DigitalHumanCall = dynamic(
+  () => import("@/components/DigitalHumanCall"),
+  { ssr: false }
+);
+
 export default function Home() {
   const allMessages = useMessages();
   const pendingNew = usePendingNewSession();
   const [status, setStatus] = useState<Status>("idle");
+  const [showVideoCall, setShowVideoCall] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -265,6 +274,13 @@ export default function Home() {
         </div>
         <p className="mt-2 text-sm text-gray-500">Press and hold to speak</p>
         <nav className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setShowVideoCall(true)}
+            className="rounded-full border border-pink-300 bg-pink-50 px-3 py-1.5 text-xs font-semibold text-pink-600 shadow-sm transition-colors hover:bg-pink-100"
+          >
+            📹 Video Call Prototype
+          </button>
           <Link
             href="/dashboard"
             className="rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-100"
@@ -345,6 +361,11 @@ export default function Home() {
       </button>
 
       <InstallPrompt />
+
+      <DigitalHumanCall
+        open={showVideoCall}
+        onClose={() => setShowVideoCall(false)}
+      />
     </main>
   );
 }
