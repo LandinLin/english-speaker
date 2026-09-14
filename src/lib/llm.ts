@@ -39,7 +39,8 @@ export function parseTutorResponse(text: string): TutorFeedback {
 
 export async function getAIResponse(
   transcript: string,
-  history: HistoryMessage[] = []
+  history: HistoryMessage[] = [],
+  messages?: { role: "system" | "user" | "assistant"; content: string }[]
 ): Promise<TutorFeedback> {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
@@ -53,7 +54,7 @@ export async function getAIResponse(
 
   const completion = await client.chat.completions.create({
     model: "deepseek-chat",
-    messages: buildTutorMessages(transcript, history),
+    messages: messages ?? buildTutorMessages(transcript, history),
     temperature: 0.7,
     max_tokens: 300,
   });

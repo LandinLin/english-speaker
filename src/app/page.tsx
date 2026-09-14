@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatTranscript from "@/components/ChatTranscript";
 import InstallPrompt from "@/components/InstallPrompt";
+import LessonMode from "@/components/LessonMode";
 import {
   addExchange,
   appendNotice,
@@ -48,6 +49,7 @@ export default function Home() {
   const pendingNew = usePendingNewSession();
   const [status, setStatus] = useState<Status>("idle");
   const [showVideoCall, setShowVideoCall] = useState(false);
+  const [mode, setMode] = useState<"chat" | "lesson">("chat");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -272,7 +274,34 @@ export default function Home() {
             {earnedBadgeCount === 1 ? "badge" : "badges"}
           </span>
         </div>
-        <p className="mt-2 text-sm text-gray-500">Press and hold to speak</p>
+        <p className="mt-2 text-sm text-gray-500">
+          {mode === "chat" ? "Press and hold to speak" : "10-minute structured lesson"}
+        </p>
+        {/* Mode toggle */}
+        <div className="mt-2 inline-flex rounded-full border border-gray-300 bg-white p-0.5 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setMode("chat")}
+            className={`rounded-full px-4 py-1 text-xs font-semibold transition-colors ${
+              mode === "chat"
+                ? "bg-blue-500 text-white"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            💬 Free Chat
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("lesson")}
+            className={`rounded-full px-4 py-1 text-xs font-semibold transition-colors ${
+              mode === "lesson"
+                ? "bg-blue-500 text-white"
+                : "text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            📚 10-Min Lesson
+          </button>
+        </div>
         <nav className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
           <button
             type="button"
@@ -313,52 +342,61 @@ export default function Home() {
         </nav>
       </header>
 
-      {/* Chat list */}
-      <div className="flex-1 overflow-y-auto px-4 pb-32">
-        <div className="mx-auto flex max-w-xl flex-col gap-3">
-          {visibleMessages.length === 0 && status === "idle" && (
-            <div className="flex flex-col items-start gap-1">
-              <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-800 shadow">
-                Hi! I&apos;m English Buddy. Press and hold the button below, then
-                say &quot;Hello!&quot; 👋
-              </div>
-            </div>
-          )}
-
-          <ChatTranscript messages={visibleMessages} />
-
-          {status === "processing" && (
-            <div className="flex flex-col items-start gap-1">
-              <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-400 shadow">
-                Thinking…
-              </div>
-            </div>
-          )}
-
-          <div ref={bottomRef} />
+      {/* Lesson mode takes over the full content area */}
+      {mode === "lesson" ? (
+        <div className="flex-1 overflow-hidden">
+          <LessonMode onExit={() => setMode("chat")} />
         </div>
-      </div>
+      ) : (
+        <>
+          {/* Chat list */}
+          <div className="flex-1 overflow-y-auto px-4 pb-32">
+            <div className="mx-auto flex max-w-xl flex-col gap-3">
+              {visibleMessages.length === 0 && status === "idle" && (
+                <div className="flex flex-col items-start gap-1">
+                  <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-800 shadow">
+                    Hi! I&apos;m English Buddy. Press and hold the button below, then
+                    say &quot;Hello!&quot; 👋
+                  </div>
+                </div>
+              )}
 
-      {/* Record button */}
-      <button
-        type="button"
-        aria-label="Press and hold to speak"
-        disabled={status === "processing"}
-        onMouseDown={handleStartMouse}
-        onMouseUp={handleStopMouse}
-        onTouchStart={handleStartTouch}
-        onTouchEnd={handleStopTouch}
-        onContextMenu={(e) => e.preventDefault()}
-        className={`fixed bottom-8 left-1/2 z-10 flex h-20 w-20 -translate-x-1/2 touch-none select-none items-center justify-center rounded-full text-3xl shadow-xl transition-all duration-200 ${
-          status === "recording"
-            ? "scale-125 bg-red-500 text-white"
-            : status === "processing"
-              ? "bg-gray-400 text-white"
-              : "bg-blue-500 text-white hover:bg-blue-600"
-        }`}
-      >
-        {status === "processing" ? "⏳" : "🎤"}
-      </button>
+              <ChatTranscript messages={visibleMessages} />
+
+              {status === "processing" && (
+                <div className="flex flex-col items-start gap-1">
+                  <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-400 shadow">
+                    Thinking…
+                  </div>
+                </div>
+              )}
+
+              <div ref={bottomRef} />
+            </div>
+          </div>
+
+          {/* Record button */}
+          <button
+            type="button"
+            aria-label="Press and hold to speak"
+            disabled={status === "processing"}
+            onMouseDown={handleStartMouse}
+            onMouseUp={handleStopMouse}
+            onTouchStart={handleStartTouch}
+            onTouchEnd={handleStopTouch}
+            onContextMenu={(e) => e.preventDefault()}
+            className={`fixed bottom-8 left-1/2 z-10 flex h-20 w-20 -translate-x-1/2 touch-none select-none items-center justify-center rounded-full text-3xl shadow-xl transition-all duration-200 ${
+              status === "recording"
+                ? "scale-125 bg-red-500 text-white"
+                : status === "processing"
+                  ? "bg-gray-400 text-white"
+                  : "bg-blue-500 text-white hover:bg-blue-600"
+            }`}
+          >
+            {status === "processing" ? "⏳" : "🎤"}
+          </button>
+        </>
+      )}
 
       <InstallPrompt />
 
