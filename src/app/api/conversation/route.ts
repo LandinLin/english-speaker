@@ -1,6 +1,6 @@
 import { transcribeAudio } from "@/lib/asr";
 import { getAIResponse } from "@/lib/llm";
-import { synthesizeSpeech } from "@/lib/tts";
+import { synthesizeSpeechEdge } from "@/lib/tts";
 import { buildLessonMessages, type HistoryMessage } from "@/lib/prompts";
 import { LESSON_STEPS, type LessonProgress } from "@/lib/lessonPlan";
 
@@ -60,6 +60,8 @@ export async function POST(request: Request) {
         startedAt: 0,
         badgesEarned: [],
         lettersLearned: [],
+        elapsedSec: 0,
+        stepTurns: [],
       };
       try {
         if (progressRaw) progress = { ...progress, ...JSON.parse(progressRaw) };
@@ -93,11 +95,16 @@ export async function POST(request: Request) {
           feedback.correction.trim().toLowerCase() === "none";
       }
 
-      // Step 3: Text → speech
-    console.log("🔊 [conversation] Step 3: Synthesizing speech…");
-    const audioBuffer = await synthesizeSpeech(feedback.reply);
-    const audioBase64 = audioBuffer.toString("base64");
-    console.log("✅ [conversation] All steps done, sending response");
+      // Step 3: Text → speech (Edge TTS, free). Failure is non-fatal: the
+    // response still succeeds with text/feedback but no audio.
+    console.log("🔊 [conversation] Step 3: Synthesizing speech (Edge TTS)…");
+    const audioBuffer = await synthesizeSpeechEdge(feedback.reply);
+    const audioBase64 = audioBuffer ? audioBuffer.toString("base64") : null;
+    console.log(
+      audioBase64
+        ? "✅ [conversation] All steps done, sending response"
+        : "⚠️ [conversation] No audio (Edge TTS failed), sending text-only response"
+    );
 
     return Response.json({
       transcript,

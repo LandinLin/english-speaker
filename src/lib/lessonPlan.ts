@@ -62,6 +62,13 @@ export const LESSON_TOTAL_DURATION = LESSON_STEPS.reduce(
   0
 ); // 600 seconds = 10 minutes
 
+/** Friendly AI teacher avatar shown in the lesson header. */
+export const TEACHER_AVATAR_URL =
+  "https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?image_size=square_hd&prompt=" +
+  encodeURIComponent(
+    "Friendly cartoon English teacher avatar for a children's learning app, warm smiling woman with glasses waving hello, colorful flat vector illustration style, soft light blue background, centered head and shoulders"
+  );
+
 export interface LessonProgress {
   stepIndex: number;
   completedSteps: number[];
@@ -69,6 +76,10 @@ export interface LessonProgress {
   completedAt?: number;
   badgesEarned: string[];
   lettersLearned: string[];
+  /** Elapsed lesson time in seconds (counts up to LESSON_TOTAL_DURATION). */
+  elapsedSec: number;
+  /** Number of completed speaking turns per step — gates the Next button. */
+  stepTurns: number[];
 }
 
 const STORAGE_KEY = "english-buddy-lesson-progress";
@@ -79,6 +90,8 @@ const DEFAULT_PROGRESS: LessonProgress = {
   startedAt: 0,
   badgesEarned: [],
   lettersLearned: [],
+  elapsedSec: 0,
+  stepTurns: [],
 };
 
 export function loadLessonProgress(): LessonProgress {

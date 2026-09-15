@@ -1,4 +1,4 @@
-import { synthesizeSpeech } from "@/lib/tts";
+import { synthesizeSpeechEdge } from "@/lib/tts";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -17,7 +17,15 @@ export async function POST(request: Request) {
       return Response.json({ error: "Missing text" }, { status: 400 });
     }
 
-    const audioBuffer = await synthesizeSpeech(text.slice(0, MAX_TEXT_LENGTH));
+    const audioBuffer = await synthesizeSpeechEdge(
+      text.slice(0, MAX_TEXT_LENGTH)
+    );
+    if (!audioBuffer) {
+      return Response.json(
+        { error: "Speech synthesis unavailable" },
+        { status: 502 }
+      );
+    }
     return Response.json({
       audioBase64: audioBuffer.toString("base64"),
     });
