@@ -47,9 +47,9 @@ export default function ChatPage() {
   const activeSessionId = pendingNew
     ? null
     : (allMessages[allMessages.length - 1]?.sessionId ?? null);
-  const visibleMessages = allMessages.filter(
-    (m) => !activeSessionId || m.sessionId === activeSessionId
-  );
+  const visibleMessages = activeSessionId
+    ? allMessages.filter((m) => m.sessionId === activeSessionId)
+    : [];
 
   // Keep the latest few messages available for the API history parameter.
   const historyRef = useRef<{ role: "user" | "assistant"; content: string }[]>(
@@ -233,7 +233,7 @@ export default function ChatPage() {
             🐣
           </div>
           <div>
-            <h1 className="text-lg font-bold leading-tight text-gray-800">
+            <h1 className="text-on-bg text-lg font-bold leading-tight">
               English Buddy
             </h1>
             <p className="text-xs text-gray-400">
@@ -249,9 +249,9 @@ export default function ChatPage() {
           type="button"
           onClick={handleNewChat}
           aria-label="Start a new chat"
-          className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-lg shadow-sm transition-colors hover:bg-gray-50"
+          className="flex h-9 items-center gap-1 rounded-full bg-white px-3.5 text-sm font-semibold text-gray-600 shadow-sm transition-colors hover:bg-gray-50"
         >
-          ✨
+          ✨ New
         </button>
       </header>
 
@@ -259,11 +259,17 @@ export default function ChatPage() {
       <div className="min-h-0 flex-1 overflow-y-auto px-4">
         <div className="mx-auto flex max-w-xl flex-col gap-3">
           {visibleMessages.length === 0 && status === "idle" && (
-            <div className="flex flex-col items-start gap-1">
-              <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2.5 text-gray-800 shadow-sm">
+            <div className="flex flex-col items-center gap-3 pt-6">
+              <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-white px-4 py-2.5 text-center text-gray-800 shadow-sm">
                 Hi! I&apos;m English Buddy. Press and hold the button below, then
                 say &quot;Hello!&quot; 👋
               </div>
+              <span aria-hidden className="animate-bounce text-2xl">
+                👇
+              </span>
+              <p className="text-xs font-medium text-gray-400">
+                Hold the big 🎤 button to talk to me!
+              </p>
             </div>
           )}
 

@@ -135,10 +135,10 @@ export default function HistoryPage() {
   };
 
   return (
-    <main className="h-full overflow-y-auto bg-gradient-to-b from-blue-50 to-purple-50">
+    <main className="h-full overflow-y-auto">
       {/* Header */}
       <header className="flex items-center justify-between px-4 pb-2 pt-4">
-        <h1 className="text-xl font-bold text-gray-800">📜 History</h1>
+        <h1 className="text-on-bg text-xl font-bold">📜 History</h1>
         {messages.length > 0 && (
           <button
             type="button"

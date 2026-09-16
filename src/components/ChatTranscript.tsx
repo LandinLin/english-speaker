@@ -116,17 +116,17 @@ function AiMessage({ message }: { message: ChatMessage }) {
       {(parts.praise || parts.correction || parts.newWord) && (
         <div className="flex max-w-[80%] flex-wrap gap-1 px-1">
           {parts.praise && (
-            <span className="rounded-full bg-green-50 px-2.5 py-1 text-[11px] font-semibold leading-tight text-green-700">
+            <span className="rounded-full bg-green-50 px-2.5 py-1 text-[11px] font-medium leading-tight text-green-600">
               ✅ {parts.praise}
             </span>
           )}
           {parts.correction && (
-            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold leading-tight text-amber-700">
+            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-medium leading-tight text-amber-600">
               ✏️ {parts.correction}
             </span>
           )}
           {parts.newWord && (
-            <span className="rounded-full bg-purple-50 px-2.5 py-1 text-[11px] font-semibold leading-tight text-purple-700">
+            <span className="rounded-full bg-purple-50 px-2.5 py-1 text-[11px] font-medium leading-tight text-purple-600">
               💡 {parts.newWord}
             </span>
           )}

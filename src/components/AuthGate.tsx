@@ -8,7 +8,7 @@ const AUTH_PATHS = new Set(["/login", "/register"]);
 
 function Splash() {
   return (
-    <div className="app-height flex flex-col items-center justify-center gap-4 bg-gradient-to-b from-blue-50 to-purple-50">
+    <div className="app-height app-bg flex flex-col items-center justify-center gap-4">
       <div className="flex h-20 w-20 animate-pulse items-center justify-center rounded-full bg-white text-4xl shadow-sm">
         🐣
       </div>

@@ -107,10 +107,10 @@ export default function DashboardPage() {
   const handleExportCsv = () => exportMessagesCsv(stats.sessions);
 
   return (
-    <main className="h-full overflow-y-auto bg-gradient-to-b from-blue-50 to-purple-50">
+    <main className="h-full overflow-y-auto">
       {/* Header */}
       <header className="flex items-center justify-between px-4 pb-2 pt-4">
-        <h1 className="text-xl font-bold text-gray-800">📊 My Progress</h1>
+        <h1 className="text-on-bg text-xl font-bold">📊 My Progress</h1>
         {stats.totalSessions > 0 && (
           <div className="flex gap-1.5">
             <button

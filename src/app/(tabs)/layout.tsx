@@ -4,7 +4,7 @@ import BottomNav from "@/components/BottomNav";
 export default function TabsLayout({ children }: { children: ReactNode }) {
   return (
     <div
-      className="app-height flex flex-col bg-[#f7f8fa]"
+      className="app-height app-bg flex flex-col"
       style={{
         paddingTop: "env(safe-area-inset-top)",
         // Bottom padding handled by the nav's own safe-area inset.

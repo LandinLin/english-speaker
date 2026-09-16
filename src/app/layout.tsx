@@ -48,6 +48,15 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
+      <head>
+        {/* Re-apply the saved background theme before first paint. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{var t=localStorage.getItem("english-buddy:theme");if(t)document.documentElement.dataset.theme=t}catch(e){}',
+          }}
+        />
+      </head>
       <body className="min-h-full flex flex-col">
         <AuthGate>{children}</AuthGate>
         <OfflineBanner />

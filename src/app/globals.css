@@ -3,6 +3,152 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* Default (Sunny Blue) page background + text color that sits on it. */
+  --app-bg: linear-gradient(180deg, #eff6ff 0%, #f5f3ff 100%);
+  --on-bg: #1f2937;
+  /* Accent used for stat numbers, glows, and highlights. */
+  --accent: #3b82f6;
+  /* Faint decorative pattern (≈2-4% visibility), geometry varies per theme. */
+  --pattern: radial-gradient(
+    color-mix(in oklab, var(--on-bg) 4%, transparent) 1.5px,
+    transparent 1.5px
+  );
+  --pattern-size: 28px 28px;
+}
+
+/* Selectable background themes — applied via <html data-theme="…">
+   (see src/lib/theme.ts). */
+html[data-theme="white"] {
+  --app-bg: #ffffff;
+  --pattern: radial-gradient(
+    circle,
+    transparent 55%,
+    color-mix(in oklab, var(--on-bg) 4%, transparent) 56% 62%,
+    transparent 63%
+  );
+  --pattern-size: 36px 36px;
+}
+html[data-theme="green"] {
+  --app-bg: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%);
+  --accent: #10b981;
+  --pattern: repeating-linear-gradient(
+    45deg,
+    color-mix(in oklab, var(--on-bg) 4%, transparent) 0 1px,
+    transparent 1px 16px
+  );
+  --pattern-size: auto;
+}
+html[data-theme="pink"] {
+  --app-bg: linear-gradient(180deg, #fdf2f8 0%, #fce7f3 100%);
+  --accent: #ec4899;
+  --pattern: radial-gradient(
+    color-mix(in oklab, var(--on-bg) 4%, transparent) 2px,
+    transparent 2px
+  );
+  --pattern-size: 22px 22px;
+}
+html[data-theme="orange"] {
+  --app-bg: linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%);
+  --accent: #f97316;
+  --pattern: repeating-linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--on-bg) 4%, transparent) 0 1px,
+    transparent 1px 18px
+  );
+  --pattern-size: auto;
+}
+html[data-theme="night"] {
+  --app-bg: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
+  --on-bg: #e2e8f0;
+  --accent: #60a5fa;
+  --pattern: radial-gradient(
+    color-mix(in oklab, var(--on-bg) 5%, transparent) 1px,
+    transparent 1px
+  );
+  --pattern-size: 34px 34px;
+}
+
+/* ── Night Black: full dark surfaces ───────────────────────────────────
+   Tailwind v4 utilities resolve through CSS variables, so remapping the
+   color variables under [data-theme="night"] darkens every card, bubble,
+   nav, input, and celebration screen across ALL pages at once. */
+html[data-theme="night"] {
+  /* cards / bubbles / nav (bg-white, bg-white/90, ring offsets) */
+  --color-white: #1f2937;
+  /* grays: text levels flip light, borders & hovers go dark */
+  --color-gray-800: #f9fafb;
+  --color-gray-700: #f3f4f6;
+  --color-gray-600: #e5e7eb;
+  --color-gray-500: #9ca3af;
+  --color-gray-400: #9ca3af;
+  --color-gray-300: #4b5563;
+  --color-gray-200: #374151;
+  --color-gray-100: #1f2937;
+  --color-gray-50: #111827;
+  /* soft blue surfaces (avatar circles, listen chip, hover) */
+  --color-blue-50: #172554;
+  --color-blue-100: #1e3a8a;
+  --color-blue-500: #3b82f6;
+  --color-blue-700: #93c5fd;
+  --color-purple-50: #2e1065;
+  --color-purple-100: #4c1d95;
+  /* feedback chips */
+  --color-green-50: #052e16;
+  --color-green-700: #86efac;
+  --color-amber-50: #451a03;
+  --color-amber-700: #fcd34d;
+  /* celebration gradients (lesson screens, complete card) */
+  --color-orange-50: #2b1608;
+  --color-orange-100: #7c2d12;
+  --color-orange-200: #9a3412;
+  --color-amber-100: #78350f;
+  --color-amber-200: #92400e;
+  --color-yellow-50: #422006;
+  --color-yellow-100: #713f12;
+  --color-pink-50: #500724;
+  --color-pink-100: #831843;
+  /* form notes */
+  --color-red-50: #450a0a;
+  --color-red-600: #fca5a5;
+}
+
+/* text-white must stay light even though --color-white is now a surface. */
+html[data-theme="night"] .text-white {
+  color: #f9fafb;
+}
+
+/* Slow breathing glow behind the Me-page avatar. */
+@keyframes glow-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.03);
+  }
+}
+
+.animate-glow-pulse {
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+/* Double pulse when the streak hits a milestone (3, 7, 14, 30, … days). */
+@keyframes milestone-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  25%,
+  75% {
+    transform: scale(1.06);
+  }
+  50% {
+    transform: scale(1);
+  }
+}
+
+.animate-milestone {
+  animation: milestone-pulse 1.6s ease-in-out 2;
 }
 
 @theme inline {
@@ -29,4 +175,29 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Page shell that follows the selected theme. isolation keeps the
+   decorative pattern layer (::before, z-index -1) above the background
+   but below all content. */
+.app-bg {
+  position: relative;
+  isolation: isolate;
+  background: var(--app-bg);
+}
+
+/* Faint per-theme decorative pattern painted behind everything. */
+.app-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--pattern, none);
+  background-size: var(--pattern-size, auto);
+}
+
+/* Text rendered directly on the themed page background. */
+.text-on-bg {
+  color: var(--on-bg);
 }
