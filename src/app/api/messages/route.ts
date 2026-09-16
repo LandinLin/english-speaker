@@ -6,6 +6,7 @@ import {
   upsertMessages,
   type StoredMessage,
 } from "@/lib/db";
+import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +25,11 @@ function isStoredMessage(value: unknown): value is StoredMessage {
 
 export async function GET() {
   try {
-    return Response.json({ messages: listMessages() });
+    const user = await getCurrentUser();
+    if (!user) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
+    return Response.json({ messages: listMessages(user.id) });
   } catch (error) {
     console.error("🗄️ [messages] GET failed:", error);
     return Response.json({ error: "Failed to read messages" }, { status: 500 });
@@ -33,13 +38,18 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const user = await getCurrentUser();
+    if (!user) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const body: unknown = await request.json();
     const raw = body && typeof body === "object" ? (body as { messages?: unknown }).messages : null;
     if (!Array.isArray(raw)) {
       return Response.json({ error: "messages array required" }, { status: 400 });
     }
+    // Client-sent user identity is ignored — the session is authoritative.
     const messages = raw.filter(isStoredMessage);
-    const count = upsertMessages(messages);
+    const count = upsertMessages(user.id, messages);
     return Response.json({ saved: count });
   } catch (error) {
     console.error("🗄️ [messages] POST failed:", error);
@@ -49,6 +59,10 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
+    const user = await getCurrentUser();
+    if (!user) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const body: unknown = await request.json();
     const { id, audioBase64 } = (body ?? {}) as {
       id?: unknown;
@@ -60,7 +74,7 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    const ok = updateMessageAudio(id, audioBase64);
+    const ok = updateMessageAudio(user.id, id, audioBase64);
     return Response.json({ updated: ok });
   } catch (error) {
     console.error("🗄️ [messages] PATCH failed:", error);
@@ -70,11 +84,15 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    const user = await getCurrentUser();
+    if (!user) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const sessionId = new URL(request.url).searchParams.get("sessionId");
     const deleted =
       sessionId === null
-        ? deleteAllMessages()
-        : deleteMessagesBySession(sessionId);
+        ? deleteAllMessages(user.id)
+        : deleteMessagesBySession(user.id, sessionId);
     return Response.json({ deleted });
   } catch (error) {
     console.error("🗄️ [messages] DELETE failed:", error);

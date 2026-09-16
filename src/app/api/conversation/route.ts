@@ -3,6 +3,7 @@ import { getAIResponse } from "@/lib/llm";
 import { synthesizeSpeechEdge } from "@/lib/tts";
 import { buildLessonMessages, type HistoryMessage } from "@/lib/prompts";
 import { LESSON_STEPS, type LessonProgress } from "@/lib/lessonPlan";
+import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -26,6 +27,11 @@ function parseHistory(raw: FormDataEntryValue | null): HistoryMessage[] {
 export async function POST(request: Request) {
   try {
     console.log("📥 [conversation] Received new conversation request");
+
+    const user = await getCurrentUser();
+    if (!user) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
 
     const formData = await request.formData();
     const audio = formData.get("audio");

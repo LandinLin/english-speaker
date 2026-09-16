@@ -12,15 +12,21 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* Viewport height: 100vh fallback, 100dvh where supported
+   (iOS Safari with a visible URL bar). */
+.app-height {
+  height: 100vh;
+}
+
+@supports (height: 100dvh) {
+  .app-height {
+    height: 100dvh;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  -webkit-tap-highlight-color: transparent;
 }

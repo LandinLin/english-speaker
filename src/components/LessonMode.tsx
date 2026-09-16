@@ -16,6 +16,7 @@ import {
   type LessonProgress,
 } from "@/lib/lessonPlan";
 import type { ChatMessage } from "@/lib/messageStore";
+import { scopedKey } from "@/lib/userScope";
 import {
   checkNewBadges,
   type Badge,
@@ -45,7 +46,11 @@ interface LessonConversationResponse {
 type Status = "idle" | "recording" | "processing";
 
 const TOUCH_MOUSE_GRACE_MS = 800;
-const LESSON_MESSAGES_KEY = "english-buddy-lesson-messages";
+const LESSON_MESSAGES_BASE = "english-buddy-lesson-messages";
+
+function lessonMessagesKey(): string {
+  return scopedKey(LESSON_MESSAGES_BASE);
+}
 
 function uid(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -96,7 +101,7 @@ function TeacherAvatar({
 function loadLessonMessages(): ChatMessage[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(LESSON_MESSAGES_KEY);
+    const raw = localStorage.getItem(lessonMessagesKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -110,7 +115,7 @@ function saveLessonMessages(messages: ChatMessage[]): void {
   try {
     // Strip audioBase64 to save space — it can be re-synthesized via TTS.
     const slim = messages.map((m) => ({ ...m, audioBase64: undefined }));
-    localStorage.setItem(LESSON_MESSAGES_KEY, JSON.stringify(slim));
+    localStorage.setItem(lessonMessagesKey(), JSON.stringify(slim));
   } catch {
     // ignore
   }
@@ -716,7 +721,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
       </div>
 
       {/* Chat area */}
-      <div className="flex-1 overflow-y-auto px-4 pb-32">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-2">
         <div className="mx-auto flex max-w-xl flex-col gap-3">
           {messages.length === 0 && status === "idle" && (
             <div className="flex items-end gap-2">
@@ -748,8 +753,8 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
         </div>
       </div>
 
-      {/* Bottom controls: Talk + Next */}
-      <div className="fixed bottom-0 left-0 right-0 z-10 flex flex-col items-center gap-1 bg-gradient-to-t from-blue-50 to-transparent px-4 pb-6 pt-2">
+      {/* Bottom controls: Talk + Next (in-flow, sits above the tab bar) */}
+      <div className="flex shrink-0 flex-col items-center gap-1 bg-gradient-to-t from-blue-50 to-transparent px-4 pb-3 pt-2">
         {!stepDone && (
           <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-bold text-amber-700 shadow-sm">
             🔒 Talk to Ms. Buddy to unlock {isLastStep ? "Finish" : "Next"}!

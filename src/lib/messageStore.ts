@@ -1,6 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
+import { scopedKey } from "./userScope";
 
 export interface ChatMessage {
   id: string;
@@ -30,11 +31,21 @@ export interface Session {
   messages: ChatMessage[];
 }
 
-/** Canonical storage: grouped, versioned sessions. */
-const SESSIONS_KEY = "english-buddy:sessions";
+/** Canonical storage: grouped, versioned sessions (per user). */
+const SESSIONS_BASE = "english-buddy:sessions";
 /** Older app versions kept a flat message list here; migrated on first load. */
-const LEGACY_MESSAGES_KEY = "english-buddy:messages";
-const PENDING_KEY = "english-buddy:pending-new-session";
+const LEGACY_MESSAGES_BASE = "english-buddy:messages";
+const PENDING_BASE = "english-buddy:pending-new-session";
+
+function sessionsKey(): string {
+  return scopedKey(SESSIONS_BASE);
+}
+function legacyMessagesKey(): string {
+  return scopedKey(LEGACY_MESSAGES_BASE);
+}
+function pendingKey(): string {
+  return scopedKey(PENDING_BASE);
+}
 // A gap longer than this automatically starts a new conversation session.
 const SESSION_GAP_MS = 30 * 60 * 1000;
 const LEGACY_SESSION_ID = "legacy-conversation";
@@ -132,14 +143,14 @@ function flattenStored(parsed: unknown): ChatMessage[] {
 /** Load + migrate messages saved by older versions of the app. */
 function loadMessages(): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(SESSIONS_KEY);
+    const raw = localStorage.getItem(sessionsKey());
     let migratedFromLegacy = false;
     let parsed: unknown = null;
 
     if (raw) {
       parsed = JSON.parse(raw);
     } else {
-      const legacyRaw = localStorage.getItem(LEGACY_MESSAGES_KEY);
+      const legacyRaw = localStorage.getItem(legacyMessagesKey());
       if (legacyRaw) {
         parsed = JSON.parse(legacyRaw);
         migratedFromLegacy = true;
@@ -151,7 +162,7 @@ function loadMessages(): ChatMessage[] {
     if (migratedFromLegacy && messages.length > 0) {
       // One-time migration: write the grouped format to the new key.
       persist(messages);
-      localStorage.removeItem(LEGACY_MESSAGES_KEY);
+      localStorage.removeItem(legacyMessagesKey());
     }
     return messages;
   } catch {
@@ -172,7 +183,7 @@ function getServerMessagesSnapshot(): ChatMessage[] {
 
 function getPendingSnapshot(): boolean {
   if (cachedPending === null) {
-    cachedPending = localStorage.getItem(PENDING_KEY) === "1";
+    cachedPending = localStorage.getItem(pendingKey()) === "1";
   }
   return cachedPending;
 }
@@ -225,6 +236,9 @@ function serverSync(): void {
   void (async () => {
     try {
       const res = await fetch("/api/messages", { cache: "no-store" });
+      // 401 is expected before login / after logout — authStore re-runs the
+      // sync when the user changes, so skip silently instead of erroring.
+      if (res.status === 401) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: { messages?: ChatMessage[] } = await res.json();
       const serverMessages = Array.isArray(data.messages)
@@ -311,7 +325,7 @@ function persist(next: ChatMessage[]): void {
       messages: s.messages,
     }));
     localStorage.setItem(
-      SESSIONS_KEY,
+      sessionsKey(),
       JSON.stringify({ version: STORAGE_VERSION, sessions })
     );
   };
@@ -350,13 +364,26 @@ function markPending(value: boolean): void {
   cachedPending = value;
   try {
     if (value) {
-      localStorage.setItem(PENDING_KEY, "1");
+      localStorage.setItem(pendingKey(), "1");
     } else {
-      localStorage.removeItem(PENDING_KEY);
+      localStorage.removeItem(pendingKey());
     }
   } catch (err) {
     console.error("💾 [store] Failed to update session flag:", err);
   }
+}
+
+/**
+ * Drop all in-memory caches and re-sync for the now-current user.
+ * Called on login/logout/registration — existing subscribers stay
+ * subscribed, so the initial server sync is re-triggered directly.
+ */
+export function resetForUserChange(): void {
+  cachedMessages = null;
+  cachedPending = null;
+  syncStarted = false;
+  emit();
+  if (typeof window !== "undefined") serverSync();
 }
 
 /** Decide which session the next spoken exchange belongs to. */

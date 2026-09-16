@@ -3,6 +3,10 @@
  * Five guided steps: greeting → teach → practice → game → wrap-up.
  */
 
+import { scopedKey } from "./userScope";
+
+const STORAGE_BASE = "english-buddy-lesson-progress";
+
 export interface LessonStep {
   id: string;
   title: string;
@@ -82,7 +86,10 @@ export interface LessonProgress {
   stepTurns: number[];
 }
 
-const STORAGE_KEY = "english-buddy-lesson-progress";
+/** Per-user progress key (resolved at call time, not module load). */
+function storageKey(): string {
+  return scopedKey(STORAGE_BASE);
+}
 
 const DEFAULT_PROGRESS: LessonProgress = {
   stepIndex: 0,
@@ -97,7 +104,7 @@ const DEFAULT_PROGRESS: LessonProgress = {
 export function loadLessonProgress(): LessonProgress {
   if (typeof window === "undefined") return { ...DEFAULT_PROGRESS };
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey());
     if (!raw) return { ...DEFAULT_PROGRESS };
     const parsed = JSON.parse(raw) as Partial<LessonProgress>;
     return { ...DEFAULT_PROGRESS, ...parsed };
@@ -109,7 +116,7 @@ export function loadLessonProgress(): LessonProgress {
 export function saveLessonProgress(progress: LessonProgress): void {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
+    localStorage.setItem(storageKey(), JSON.stringify(progress));
   } catch {
     // Storage full or unavailable — lesson still works in-memory.
   }

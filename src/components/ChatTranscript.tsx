@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { ChatMessage } from "@/lib/messageStore";
 import { setMessageAudio } from "@/lib/messageStore";
 import { playClip, stopPlayback, usePlayingMessageId } from "@/lib/audioPlayer";
+import { displayParts } from "@/lib/feedbackParser";
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
@@ -12,7 +13,13 @@ function formatTime(ts: number): string {
   });
 }
 
-function ListenButton({ message }: { message: ChatMessage }) {
+function ListenButton({
+  message,
+  speakText,
+}: {
+  message: ChatMessage;
+  speakText: string;
+}) {
   const playingId = usePlayingMessageId();
   const [loading, setLoading] = useState(false);
   const isPlaying = playingId === message.id;
@@ -32,7 +39,7 @@ function ListenButton({ message }: { message: ChatMessage }) {
         const res = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: message.text }),
+          body: JSON.stringify({ text: speakText }),
         });
         const data: { audioBase64?: string; error?: string } =
           await res.json();
@@ -84,32 +91,53 @@ export default function ChatTranscript({
             </span>
           </div>
         ) : (
-          <div key={message.id} className="flex flex-col items-start gap-1">
-            <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-800 shadow">
-              {message.text}
-            </div>
-            {(message.praise || message.correction || message.newWord) && (
-              <div className="max-w-[80%] space-y-0.5 px-1 text-xs text-gray-500">
-                {message.praise && message.praise !== "None" && (
-                  <p>✅ {message.praise}</p>
-                )}
-                {message.correction && message.correction !== "None" && (
-                  <p>✏️ {message.correction}</p>
-                )}
-                {message.newWord && message.newWord !== "None" && (
-                  <p>💡 {message.newWord}</p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center gap-2 px-1">
-              <ListenButton message={message} />
-              <span className="text-[10px] text-gray-400">
-                {formatTime(message.createdAt)}
-              </span>
-            </div>
-          </div>
+          <AiMessage key={message.id} message={message} />
         )
       )}
     </>
+  );
+}
+
+function AiMessage({ message }: { message: ChatMessage }) {
+  // Pulls structured feedback into chips; also repairs legacy messages
+  // whose bubble text contains PRAISE:/CORRECTION:/NEW_WORD: inline.
+  const parts = displayParts({
+    text: message.text,
+    praise: message.praise,
+    correction: message.correction,
+    newWord: message.newWord,
+  });
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-white px-4 py-2 text-gray-800 shadow-sm">
+        {parts.text}
+      </div>
+      {(parts.praise || parts.correction || parts.newWord) && (
+        <div className="flex max-w-[80%] flex-wrap gap-1 px-1">
+          {parts.praise && (
+            <span className="rounded-full bg-green-50 px-2.5 py-1 text-[11px] font-semibold leading-tight text-green-700">
+              ✅ {parts.praise}
+            </span>
+          )}
+          {parts.correction && (
+            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold leading-tight text-amber-700">
+              ✏️ {parts.correction}
+            </span>
+          )}
+          {parts.newWord && (
+            <span className="rounded-full bg-purple-50 px-2.5 py-1 text-[11px] font-semibold leading-tight text-purple-700">
+              💡 {parts.newWord}
+            </span>
+          )}
+        </div>
+      )}
+      <div className="flex items-center gap-2 px-1">
+        <ListenButton message={message} speakText={parts.text} />
+        <span className="text-[10px] text-gray-400">
+          {formatTime(message.createdAt)}
+        </span>
+      </div>
+    </div>
   );
 }

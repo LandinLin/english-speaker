@@ -1,4 +1,5 @@
 import { synthesizeSpeechEdge } from "@/lib/tts";
+import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -7,6 +8,11 @@ const MAX_TEXT_LENGTH = 500;
 
 export async function POST(request: Request) {
   try {
+    const user = await getCurrentUser();
+    if (!user) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
+
     const body: unknown = await request.json();
     const text =
       body && typeof body === "object" && "text" in body

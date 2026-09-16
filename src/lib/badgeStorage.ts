@@ -1,7 +1,15 @@
 import type { LearningStats } from "./badges";
+import { scopedKey } from "./userScope";
 
-const BADGES_KEY = "english-buddy-badges";
-const STATS_KEY = "english-buddy-stats";
+const BADGES_BASE = "english-buddy-badges";
+const STATS_BASE = "english-buddy-stats";
+
+function badgesKey(): string {
+  return scopedKey(BADGES_BASE);
+}
+function statsKey(): string {
+  return scopedKey(STATS_BASE);
+}
 
 const DEFAULT_STATS: LearningStats = {
   totalLessons: 0,
@@ -19,7 +27,7 @@ const DEFAULT_STATS: LearningStats = {
 export function getEarnedBadges(): string[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(BADGES_KEY);
+    const raw = localStorage.getItem(badgesKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
@@ -31,7 +39,7 @@ export function getEarnedBadges(): string[] {
 export function saveEarnedBadges(ids: string[]): void {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(BADGES_KEY, JSON.stringify(ids));
+    localStorage.setItem(badgesKey(), JSON.stringify(ids));
   } catch {
     // ignore
   }
@@ -50,7 +58,7 @@ export function addEarnedBadge(id: string): string[] {
 export function getStats(): LearningStats {
   if (typeof window === "undefined") return { ...DEFAULT_STATS };
   try {
-    const raw = localStorage.getItem(STATS_KEY);
+    const raw = localStorage.getItem(statsKey());
     if (!raw) return { ...DEFAULT_STATS };
     const parsed = JSON.parse(raw) as Partial<LearningStats>;
     return { ...DEFAULT_STATS, ...parsed };
@@ -62,7 +70,7 @@ export function getStats(): LearningStats {
 export function saveStats(stats: LearningStats): void {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(STATS_KEY, JSON.stringify(stats));
+    localStorage.setItem(statsKey(), JSON.stringify(stats));
   } catch {
     // ignore
   }
@@ -72,8 +80,8 @@ export function saveStats(stats: LearningStats): void {
 
 export function resetBadgesAndStats(): void {
   if (typeof window === "undefined") return;
-  localStorage.removeItem(BADGES_KEY);
-  localStorage.removeItem(STATS_KEY);
+  localStorage.removeItem(badgesKey());
+  localStorage.removeItem(statsKey());
 }
 
 /** Force-unlock a badge by ID — for testing. */

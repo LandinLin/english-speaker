@@ -3,39 +3,9 @@ import {
   buildTutorMessages,
   type HistoryMessage,
 } from "./prompts";
+import { parseTutorResponse, type TutorFeedback } from "./feedbackParser";
 
-export interface TutorFeedback {
-  reply: string;
-  praise: string;
-  correction: string;
-  newWord: string;
-}
-
-function extractField(text: string, label: string): string {
-  const match = text.match(new RegExp(`^\\s*${label}\\s*:\\s*(.+)$`, "im"));
-  return match ? match[1].trim() : "";
-}
-
-export function parseTutorResponse(text: string): TutorFeedback {
-  const reply = extractField(text, "REPLY");
-
-  if (reply) {
-    return {
-      reply,
-      praise: extractField(text, "PRAISE") || "None",
-      correction: extractField(text, "CORRECTION") || "None",
-      newWord: extractField(text, "NEW_WORD") || "None",
-    };
-  }
-
-  // Fallback: structured parsing failed — use the raw text as the reply.
-  return {
-    reply: text.trim(),
-    praise: "None",
-    correction: "None",
-    newWord: "None",
-  };
-}
+export type { TutorFeedback };
 
 export async function getAIResponse(
   transcript: string,

@@ -135,30 +135,22 @@ export default function HistoryPage() {
   };
 
   return (
-    <main className="min-h-dvh bg-gradient-to-b from-blue-50 to-purple-50">
+    <main className="h-full overflow-y-auto bg-gradient-to-b from-blue-50 to-purple-50">
       {/* Header */}
-      <header className="sticky top-0 z-10 border-b border-gray-200/60 bg-white/80 px-4 py-4 backdrop-blur">
-        <div className="relative mx-auto flex max-w-xl items-center justify-center">
-          <Link
-            href="/"
-            className="absolute left-0 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-100"
+      <header className="flex items-center justify-between px-4 pb-2 pt-4">
+        <h1 className="text-xl font-bold text-gray-800">📜 History</h1>
+        {messages.length > 0 && (
+          <button
+            type="button"
+            onClick={handleClearAll}
+            className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50"
           >
-            ← Back
-          </Link>
-          <h1 className="text-xl font-bold text-gray-800">📜 History</h1>
-          {messages.length > 0 && (
-            <button
-              type="button"
-              onClick={handleClearAll}
-              className="absolute right-0 rounded-full border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-100"
-            >
-              Clear all
-            </button>
-          )}
-        </div>
+            Clear all
+          </button>
+        )}
       </header>
 
-      <div className="mx-auto max-w-xl px-4 py-5">
+      <div className="mx-auto max-w-xl px-4 py-3 pb-8">
         {groups.length === 0 ? (
           <div className="mt-20 flex flex-col items-center gap-3 text-center">
             <p className="text-5xl">🎈</p>

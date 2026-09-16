@@ -4,6 +4,7 @@ import "./globals.css";
 import ServiceWorkerRegister from "@/components/ServiceWorkerRegister";
 import OfflineBanner from "@/components/OfflineBanner";
 import OfflineQueueDrain from "@/components/OfflineQueueDrain";
+import AuthGate from "@/components/AuthGate";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -48,7 +49,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        {children}
+        <AuthGate>{children}</AuthGate>
         <OfflineBanner />
         <OfflineQueueDrain />
         <ServiceWorkerRegister />

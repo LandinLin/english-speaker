@@ -302,9 +302,9 @@ export default function DigitalHumanCall({
     busy === "disconnect" || connection === ConnectionState.Disconnecting;
 
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col bg-gradient-to-b from-gray-900 to-blue-950">
+    <div className="flex h-full flex-col bg-gradient-to-b from-gray-900 to-blue-950">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 pt-6 pb-3 text-white">
+      <div className="flex shrink-0 items-center justify-between px-4 pt-4 pb-3 text-white">
         <div className="flex items-center gap-2">
           <span className="text-xl">🧑‍🏫</span>
           <div>
@@ -342,7 +342,7 @@ export default function DigitalHumanCall({
       </div>
 
       {/* Video stage */}
-      <div className="flex flex-1 items-center justify-center px-4 pb-4">
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 pb-3">
         <div className="relative aspect-video w-full max-w-2xl overflow-hidden rounded-3xl bg-black shadow-2xl ring-1 ring-white/10">
           <video
             ref={videoRef}
@@ -377,7 +377,7 @@ export default function DigitalHumanCall({
       </div>
 
       {/* Status / error */}
-      <div className="px-4 text-center">
+      <div className="shrink-0 px-4 text-center">
         {error && (
           <p className="mx-auto mb-2 max-w-md rounded-xl bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200">
             ⚠️ {error}
@@ -419,10 +419,7 @@ export default function DigitalHumanCall({
       </div>
 
       {/* Controls */}
-      <div
-        className="flex items-center justify-center gap-3 px-4 pb-10"
-        style={{ paddingBottom: "max(2.5rem, env(safe-area-inset-bottom))" }}
-      >
+      <div className="flex shrink-0 items-center justify-center gap-3 px-4 pb-3">
         {showStart && (
           <button
             type="button"
@@ -468,7 +465,7 @@ export default function DigitalHumanCall({
         )}
       </div>
 
-      <p className="pb-6 text-center text-[10px] text-blue-300/60">
+      <p className="shrink-0 pb-3 text-center text-[10px] text-blue-300/60">
         Voice: your STT → LLM pipeline · video &amp; lip-sync by D-ID
       </p>
     </div>

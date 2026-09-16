@@ -4,8 +4,10 @@
  * Outbox for voice messages recorded while offline.
  * Audio blobs live in IndexedDB (localStorage can't hold Blobs) and are
  * drained to /api/conversation by <OfflineQueueDrain/> when connectivity
- * returns.
+ * returns. The database is scoped per logged-in user.
  */
+
+import { getCurrentUserId } from "./userScope";
 
 export interface QueuedExchange {
   id?: number;
@@ -14,16 +16,29 @@ export interface QueuedExchange {
   queuedAt: number;
 }
 
-const DB_NAME = "english-buddy-offline";
+const DB_NAME_BASE = "english-buddy-offline";
 const STORE = "queue";
 const DB_VERSION = 1;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
+function dbName(): string {
+  const userId = getCurrentUserId();
+  return `${DB_NAME_BASE}:${userId ?? "none"}`;
+}
+
+/** Close and forget the current connection (called on login/logout). */
+export function resetOfflineQueue(): void {
+  if (dbPromise) {
+    dbPromise.then((db) => db.close()).catch(() => {});
+    dbPromise = null;
+  }
+}
+
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(dbName(), DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE)) {
