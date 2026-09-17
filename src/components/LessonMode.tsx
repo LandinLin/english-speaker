@@ -1,13 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import ChatTranscript from "@/components/ChatTranscript";
+import AccentPicker from "@/components/AccentPicker";
 import BadgeUnlock from "@/components/BadgeUnlock";
 import LessonComplete from "@/components/LessonComplete";
 import MicroCelebration, { type MicroType } from "@/components/MicroCelebration";
 import { playClip, stopPlayback } from "@/lib/audioPlayer";
 import {
+  LESSON_ID,
   LESSON_STEPS,
+  LESSON_TITLE,
   LESSON_TOTAL_DURATION,
   TEACHER_AVATAR_URL,
   loadLessonProgress,
@@ -16,7 +20,12 @@ import {
   type LessonProgress,
 } from "@/lib/lessonPlan";
 import type { ChatMessage } from "@/lib/messageStore";
+import {
+  ingestExternalMessages,
+  saveSessionMeta,
+} from "@/lib/messageStore";
 import { scopedKey } from "@/lib/userScope";
+import { useAccent } from "@/lib/accent";
 import {
   checkNewBadges,
   type Badge,
@@ -122,14 +131,23 @@ function saveLessonMessages(messages: ChatMessage[]): void {
 }
 
 export default function LessonMode({ onExit }: { onExit: () => void }) {
+  const router = useRouter();
+  const accent = useAccent();
+
   const [progress, setProgress] = useState<LessonProgress>(() => {
     const loaded = loadLessonProgress();
-    return loaded.startedAt === 0
-      ? { ...loaded, startedAt: Date.now() }
-      : loaded;
+    const next =
+      loaded.startedAt === 0 ? { ...loaded, startedAt: Date.now() } : loaded;
+    // Every lesson attempt gets its own canonical history session id.
+    if (!next.sessionId) next.sessionId = uid();
+    return next;
   });
+  // Always tag restored in-lesson messages with THIS attempt's session id
+  // (older builds persisted them under the fixed id "lesson"). `progress` is
+  // already initialized when this second initializer runs.
+  const initialSessionId = progress.sessionId ?? "lesson";
   const [messages, setMessages] = useState<ChatMessage[]>(() =>
-    loadLessonMessages()
+    loadLessonMessages().map((m) => ({ ...m, sessionId: initialSessionId }))
   );
   const [status, setStatus] = useState<Status>("idle");
   const [lessonComplete, setLessonComplete] = useState<boolean>(
@@ -141,6 +159,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
   const [microTrigger, setMicroTrigger] = useState(0);
   const [microType, setMicroType] = useState<MicroType>("correct");
   const [avatarReady, setAvatarReady] = useState(false);
+  const [earnedStars, setEarnedStars] = useState(0);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -151,6 +170,9 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     []
   );
   const stepIndexRef = useRef(progress.stepIndex);
+  const sessionIdRef = useRef(progress.sessionId ?? "lesson");
+  /** Prevents re-writing the "lesson started" meta on re-renders. */
+  const metaStartedForRef = useRef<string | null>(null);
 
   const stepIndex = progress.stepIndex;
   const currentStep = LESSON_STEPS[stepIndex] ?? LESSON_STEPS[0];
@@ -274,11 +296,31 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     saveLessonProgress(progress);
   }, [progress]);
 
+  // Record the lesson as soon as it starts so it appears (as in-progress)
+  // in Lesson History even if the child exits early or time runs out.
+  useEffect(() => {
+    const sid = progress.sessionId;
+    if (!sid || metaStartedForRef.current === sid) return;
+    metaStartedForRef.current = sid;
+    saveSessionMeta({
+      id: sid,
+      type: "lesson",
+      lessonId: LESSON_ID,
+      lessonTitle: LESSON_TITLE,
+      durationMinutes: 0,
+      completedSteps: 0,
+      totalSteps: LESSON_STEPS.length,
+      starsEarned: 0,
+      correctionsCount: 0,
+      updatedAt: progress.startedAt || Date.now(),
+    });
+  }, [progress.sessionId, progress.startedAt]);
+
   const addMessage = useCallback(
     (role: "user" | "ai", text: string, extra?: Partial<ChatMessage>) => {
       const msg: ChatMessage = {
         id: uid(),
-        sessionId: "lesson",
+        sessionId: sessionIdRef.current,
         createdAt: Date.now(),
         role,
         text,
@@ -319,6 +361,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     formData.append("mode", "lesson");
     formData.append("stepIndex", String(stepIndexRef.current));
     formData.append("progress", JSON.stringify(progress));
+    formData.append("accent", accent);
 
     try {
       const res = await fetch("/api/conversation", {
@@ -336,13 +379,16 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
         return;
       }
 
-      addMessage("user", data.transcript ?? "");
+      const userMsg = addMessage("user", data.transcript ?? "");
       const aiMsg = addMessage("ai", data.aiText ?? "", {
         praise: data.feedback?.praise,
         correction: data.feedback?.correction,
         newWord: data.feedback?.newWord,
         audioBase64: data.audioBase64,
       });
+      // Persist the exchange into canonical history (DB) so lessons and
+      // chats have separate, filterable histories.
+      ingestExternalMessages([userMsg, aiMsg]);
       if (aiMsg.audioBase64) {
         playClip(aiMsg.id, `data:audio/mpeg;base64,${aiMsg.audioBase64}`);
       }
@@ -400,7 +446,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     } finally {
       setStatus("idle");
     }
-  }, [addMessage, progress]);
+  }, [addMessage, progress, accent]);
 
   const startRecording = useCallback(async () => {
     if (status !== "idle") return;
@@ -467,6 +513,32 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     streamRef.current = null;
   }, [timedOut]);
 
+  // Time's up: park the unfinished lesson in history with a time-up marker.
+  const timedOutSavedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!timedOut || lessonComplete) return;
+    const sid = sessionIdRef.current;
+    if (timedOutSavedRef.current === sid) return;
+    timedOutSavedRef.current = sid;
+    const correctionsCount = messages.filter(
+      (m) => m.role === "ai" && m.correction && m.correction !== "None"
+    ).length;
+    saveSessionMeta({
+      id: sid,
+      type: "lesson",
+      lessonId: LESSON_ID,
+      lessonTitle: LESSON_TITLE,
+      durationMinutes: Math.max(1, Math.round(progress.elapsedSec / 60)),
+      completedSteps: progress.completedSteps.length,
+      totalSteps: LESSON_STEPS.length,
+      starsEarned: 0,
+      correctionsCount,
+      timedOut: true,
+      updatedAt: Date.now(),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timedOut, lessonComplete]);
+
   const handleStartMouse = (e: React.MouseEvent) => {
     e.preventDefault();
     if (Date.now() - lastTouchAtRef.current < TOUCH_MOUSE_GRACE_MS) return;
@@ -495,10 +567,28 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     if (isLastStep) {
       // Complete the lesson — update stats and check for badges
       const currentStats = getStats();
-      const hasCorrections = messages.some(
+      const correctionsCount = messages.filter(
         (m) => m.role === "ai" && m.correction && m.correction !== "None"
-      );
+      ).length;
+      const hasCorrections = correctionsCount > 0;
       const earnedMinutes = Math.max(1, Math.round(progress.elapsedSec / 60));
+      const stars = hasCorrections ? 2 : 3;
+
+      // Save the finished lesson to lesson history.
+      saveSessionMeta({
+        id: sessionIdRef.current,
+        type: "lesson",
+        lessonId: LESSON_ID,
+        lessonTitle: LESSON_TITLE,
+        durationMinutes: earnedMinutes,
+        completedSteps: LESSON_STEPS.length,
+        totalSteps: LESSON_STEPS.length,
+        starsEarned: stars,
+        correctionsCount,
+        updatedAt: Date.now(),
+      });
+      setEarnedStars(stars);
+
       const updatedStats: LearningStats = {
         ...currentStats,
         totalLessons: currentStats.totalLessons + 1,
@@ -541,12 +631,20 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
   const handlePlayAgain = useCallback(() => {
     stopPlayback();
     const fresh = resetLessonProgress();
-    setProgress(fresh);
+    const next: LessonProgress = { ...fresh, sessionId: uid() };
+    sessionIdRef.current = next.sessionId!;
+    setProgress(next);
     setMessages([]);
     setLessonComplete(false);
+    setEarnedStars(0);
     setError(null);
     saveLessonMessages([]);
   }, []);
+
+  const handlePastLessons = useCallback(() => {
+    stopPlayback();
+    router.push("/history?filter=lessons");
+  }, [router]);
 
   const handleExit = useCallback(() => {
     stopPlayback();
@@ -561,6 +659,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
         <LessonComplete
           stats={currentStats}
           newBadges={lessonNewBadges}
+          stars={earnedStars}
           onPlayAgain={handlePlayAgain}
           onExit={handleExit}
         />
@@ -654,16 +753,26 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
       {/* Progress bar */}
       <div className="border-b border-gray-200 bg-white/80 px-4 py-3 backdrop-blur">
         <div className="mx-auto max-w-xl">
-          <div className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={handleExit}
-              className="rounded-full px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
-            >
-              ← Exit
-            </button>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleExit}
+                className="rounded-full px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
+              >
+                ← Exit
+              </button>
+              <button
+                type="button"
+                onClick={handlePastLessons}
+                className="rounded-full px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
+              >
+                📜 Past
+              </button>
+              <AccentPicker compact />
+            </div>
             <span
-              className={`rounded-full px-3 py-1 text-sm font-extrabold tabular-nums shadow-sm transition-colors ${
+              className={`shrink-0 rounded-full px-3 py-1 text-sm font-extrabold tabular-nums shadow-sm transition-colors ${
                 remainingSec <= 60
                   ? "animate-pulse bg-red-100 text-red-600"
                   : "bg-blue-100 text-blue-700"
@@ -671,7 +780,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
             >
               ⏱ {formatTime(remainingSec)}
             </span>
-            <span className="text-sm font-bold text-gray-700">
+            <span className="shrink-0 text-sm font-bold text-gray-700">
               Step {stepIndex + 1} / {LESSON_STEPS.length}
             </span>
           </div>

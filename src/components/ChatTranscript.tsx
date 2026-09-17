@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/messageStore";
 import { setMessageAudio } from "@/lib/messageStore";
 import { playClip, stopPlayback, usePlayingMessageId } from "@/lib/audioPlayer";
 import { displayParts } from "@/lib/feedbackParser";
+import { useAccent } from "@/lib/accent";
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
@@ -21,6 +22,7 @@ function ListenButton({
   speakText: string;
 }) {
   const playingId = usePlayingMessageId();
+  const accent = useAccent();
   const [loading, setLoading] = useState(false);
   const isPlaying = playingId === message.id;
 
@@ -39,7 +41,7 @@ function ListenButton({
         const res = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: speakText }),
+          body: JSON.stringify({ text: speakText, accent }),
         });
         const data: { audioBase64?: string; error?: string } =
           await res.json();

@@ -4,6 +4,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { setCurrentUserId } from "./userScope";
 import { resetForUserChange } from "./messageStore";
 import { resetOfflineQueue } from "./offlineQueue";
+import { resetAccent } from "./accent";
 
 export interface AuthUser {
   id: string;
@@ -67,6 +68,7 @@ function applyUserChange(user: AuthUser | null): void {
   }
   setCurrentUserId(user ? user.id : null);
   resetOfflineQueue();
+  resetAccent();
   resetForUserChange();
   setState(user ? { status: "authed", user } : { status: "guest", user: null });
 }
@@ -100,6 +102,7 @@ export function bootAuth(): void {
         // Scope may differ from the offline cache — reload that user's data.
         if (scopeChanged) {
           resetOfflineQueue();
+          resetAccent();
           resetForUserChange();
         }
       } else {

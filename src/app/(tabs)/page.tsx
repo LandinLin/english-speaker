@@ -1,17 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatTranscript from "@/components/ChatTranscript";
+import AccentPicker from "@/components/AccentPicker";
 import InstallPrompt from "@/components/InstallPrompt";
 import {
   addExchange,
   appendNotice,
   beginNewSession,
+  lastChatSessionId,
   useMessages,
   usePendingNewSession,
 } from "@/lib/messageStore";
 import { playClip, stopPlayback } from "@/lib/audioPlayer";
 import { enqueueExchange } from "@/lib/offlineQueue";
+import { useAccent } from "@/lib/accent";
 
 interface ConversationResponse {
   transcript?: string;
@@ -34,6 +37,7 @@ const TOUCH_MOUSE_GRACE_MS = 800;
 export default function ChatPage() {
   const allMessages = useMessages();
   const pendingNew = usePendingNewSession();
+  const accent = useAccent();
   const [status, setStatus] = useState<Status>("idle");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -42,14 +46,16 @@ export default function ChatPage() {
   const lastTouchAtRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Home shows the latest session; "New chat" shows an empty conversation
-  // until the child speaks again.
-  const activeSessionId = pendingNew
-    ? null
-    : (allMessages[allMessages.length - 1]?.sessionId ?? null);
-  const visibleMessages = activeSessionId
-    ? allMessages.filter((m) => m.sessionId === activeSessionId)
-    : [];
+  // Home shows the latest CHAT session (lessons never appear here); "New chat"
+  // shows an empty conversation until the child speaks again.
+  const { visibleMessages } = useMemo(() => {
+    const sid = pendingNew ? null : lastChatSessionId(allMessages);
+    return {
+      visibleMessages: sid
+        ? allMessages.filter((m) => m.sessionId === sid)
+        : [],
+    };
+  }, [allMessages, pendingNew]);
 
   // Keep the latest few messages available for the API history parameter.
   const historyRef = useRef<{ role: "user" | "assistant"; content: string }[]>(
@@ -109,7 +115,7 @@ export default function ChatPage() {
     // automatically and the answer arrives via the event listener above.
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       try {
-        await enqueueExchange(blob, historyRef.current);
+        await enqueueExchange(blob, historyRef.current, accent);
         appendNotice(
           "📴 Saved! I'll answer as soon as you're back online."
         );
@@ -127,6 +133,7 @@ export default function ChatPage() {
       new File([blob], "speech.webm", { type: blob.type })
     );
     formData.append("history", JSON.stringify(historyRef.current));
+    formData.append("accent", accent);
 
     try {
       const res = await fetch("/api/conversation", {
@@ -245,14 +252,17 @@ export default function ChatPage() {
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleNewChat}
-          aria-label="Start a new chat"
-          className="flex h-9 items-center gap-1 rounded-full bg-white px-3.5 text-sm font-semibold text-gray-600 shadow-sm transition-colors hover:bg-gray-50"
-        >
-          ✨ New
-        </button>
+        <div className="flex items-center gap-2">
+          <AccentPicker compact />
+          <button
+            type="button"
+            onClick={handleNewChat}
+            aria-label="Start a new chat"
+            className="flex h-9 items-center gap-1 rounded-full bg-white px-3.5 text-sm font-semibold text-gray-600 shadow-sm transition-colors hover:bg-gray-50"
+          >
+            ✨ New
+          </button>
+        </div>
       </header>
 
       {/* Chat list */}

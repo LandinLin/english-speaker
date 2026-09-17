@@ -13,6 +13,8 @@ export interface QueuedExchange {
   id?: number;
   audio: Blob;
   history: { role: "user" | "assistant"; content: string }[];
+  /** Teacher accent id ("us" | "uk" | "au" | "in"). */
+  accent?: string;
   queuedAt: number;
 }
 
@@ -53,7 +55,8 @@ function openDb(): Promise<IDBDatabase> {
 
 export async function enqueueExchange(
   audio: Blob,
-  history: QueuedExchange["history"]
+  history: QueuedExchange["history"],
+  accent?: string
 ): Promise<void> {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
@@ -61,6 +64,7 @@ export async function enqueueExchange(
     tx.objectStore(STORE).put({
       audio,
       history,
+      ...(accent ? { accent } : {}),
       queuedAt: Date.now(),
     } satisfies Omit<QueuedExchange, "id">);
     tx.oncomplete = () => resolve();

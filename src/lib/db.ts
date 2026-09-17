@@ -28,6 +28,37 @@ export interface SessionUser {
   displayName: string;
 }
 
+/** Session-level metadata. Sessions without a row default to type 'chat'. */
+export interface StoredSessionMeta {
+  id: string;
+  type: "chat" | "lesson";
+  lessonId?: string;
+  lessonTitle?: string;
+  durationMinutes?: number;
+  completedSteps?: number;
+  totalSteps?: number;
+  starsEarned?: number;
+  correctionsCount?: number;
+  /** True when the 10-minute timer expired before the lesson finished. */
+  timedOut?: boolean;
+  updatedAt: number;
+}
+
+interface SessionMetaRow {
+  id: string;
+  user_id: string;
+  type: string;
+  lesson_id: string | null;
+  lesson_title: string | null;
+  duration_minutes: number | null;
+  completed_steps: number | null;
+  total_steps: number | null;
+  stars_earned: number | null;
+  corrections_count: number | null;
+  timed_out: number | null;
+  updated_at: number;
+}
+
 interface MessageRow {
   id: string;
   session_id: string;
@@ -57,61 +88,101 @@ function getDb(): Database.Database {
 }
 
 // ---------------------------------------------------------------------------
-// Migration (v1 → v2): users + auth_sessions + messages.user_id
-// Backs up the database file first, then runs all DDL in one transaction
-// (rollback on any failure).
+// Migration. Each step upgrades PRAGMA user_version by one, backs up the
+// database file first (when data exists), and runs its DDL inside a single
+// transaction with rollback on failure.
+//   v1 → v2: users + auth_sessions + messages.user_id
+//   v2 → v3: session_meta (chat/lesson typing + lesson results)
 // ---------------------------------------------------------------------------
 function migrate(database: Database.Database, dbPath: string): void {
-  const userVersion = database.pragma("user_version", { simple: true }) as number;
-  if (userVersion >= 2) return;
+  let userVersion = database.pragma("user_version", { simple: true }) as number;
+  if (userVersion >= 3) return;
 
-  // Only back up when a database file with existing data is present.
-  if (fs.existsSync(dbPath)) {
+  const backup = (targetVersion: number) => {
+    if (!fs.existsSync(dbPath)) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backupPath = path.join(
       path.dirname(dbPath),
-      `english-buddy.backup-${stamp}.db`
+      `english-buddy.backup-v${targetVersion}-${stamp}.db`
     );
     database.backup(backupPath);
-    console.log(`🗄️ [db] Pre-migration backup created: ${backupPath}`);
+    console.log(`🗄️ [db] Pre-v${targetVersion} backup created: ${backupPath}`);
+  };
+
+  // ── v1 → v2 ──────────────────────────────────────────────────────────
+  if (userVersion < 2) {
+    backup(2);
+    const hasUserIdColumn = (
+      database.prepare("PRAGMA table_info(messages)").all() as { name: string }[]
+    ).some((col) => col.name === "user_id");
+
+    const v2 = database.transaction(() => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          password_hash TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+          token TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+      `);
+      if (!hasUserIdColumn) {
+        database.exec(`
+          ALTER TABLE messages ADD COLUMN user_id TEXT;
+          CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+        `);
+      }
+      database.pragma("user_version = 2");
+    });
+
+    try {
+      v2();
+      userVersion = 2;
+      console.log("✅ [db] Migration to v2 complete (users + sessions + user_id)");
+    } catch (err) {
+      console.error("❌ [db] v2 migration failed (rolled back):", err);
+      throw err;
+    }
   }
 
-  const hasUserIdColumn = (
-    database.prepare("PRAGMA table_info(messages)").all() as { name: string }[]
-  ).some((col) => col.name === "user_id");
-
-  const migrateTxn = database.transaction(() => {
-    database.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        username TEXT NOT NULL UNIQUE,
-        display_name TEXT NOT NULL,
-        password_hash TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS auth_sessions (
-        token TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        expires_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
-      CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
-    `);
-    if (!hasUserIdColumn) {
+  // ── v2 → v3 ──────────────────────────────────────────────────────────
+  if (userVersion < 3) {
+    backup(3);
+    const v3 = database.transaction(() => {
       database.exec(`
-        ALTER TABLE messages ADD COLUMN user_id TEXT;
-        CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+        CREATE TABLE IF NOT EXISTS session_meta (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          type TEXT NOT NULL DEFAULT 'chat',
+          lesson_id TEXT,
+          lesson_title TEXT,
+          duration_minutes INTEGER,
+          completed_steps INTEGER,
+          total_steps INTEGER,
+          stars_earned INTEGER,
+          corrections_count INTEGER,
+          timed_out INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_meta_user ON session_meta(user_id);
       `);
-    }
-    database.pragma("user_version = 2");
-  });
+      database.pragma("user_version = 3");
+    });
 
-  try {
-    migrateTxn();
-    console.log("✅ [db] Migration to v2 complete (users + sessions + user_id)");
-  } catch (err) {
-    console.error("❌ [db] Migration failed (rolled back):", err);
-    throw err;
+    try {
+      v3();
+      console.log("✅ [db] Migration to v3 complete (session_meta)");
+    } catch (err) {
+      console.error("❌ [db] v3 migration failed (rolled back):", err);
+      throw err;
+    }
   }
 }
 
@@ -337,4 +408,99 @@ export function adoptOrphanMessages(userId: string): number {
     .prepare("UPDATE messages SET user_id = ? WHERE user_id IS NULL")
     .run(userId);
   return info.changes;
+}
+
+// ---------------------------------------------------------------------------
+// Session metadata (chat vs lesson, lesson results)
+// ---------------------------------------------------------------------------
+
+function rowToSessionMeta(row: SessionMetaRow): StoredSessionMeta {
+  return {
+    id: row.id,
+    type: row.type === "lesson" ? "lesson" : "chat",
+    ...(row.lesson_id !== null ? { lessonId: row.lesson_id } : {}),
+    ...(row.lesson_title !== null ? { lessonTitle: row.lesson_title } : {}),
+    ...(row.duration_minutes !== null
+      ? { durationMinutes: row.duration_minutes }
+      : {}),
+    ...(row.completed_steps !== null
+      ? { completedSteps: row.completed_steps }
+      : {}),
+    ...(row.total_steps !== null ? { totalSteps: row.total_steps } : {}),
+    ...(row.stars_earned !== null ? { starsEarned: row.stars_earned } : {}),
+    ...(row.corrections_count !== null
+      ? { correctionsCount: row.corrections_count }
+      : {}),
+    ...(row.timed_out === 1 ? { timedOut: true } : {}),
+    updatedAt: row.updated_at,
+  };
+}
+
+/** All session metadata rows for a user, oldest first. */
+export function listSessionMeta(userId: string): StoredSessionMeta[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, user_id, type, lesson_id, lesson_title, duration_minutes,
+              completed_steps, total_steps, stars_earned, corrections_count,
+              timed_out, updated_at
+       FROM session_meta WHERE user_id = ? ORDER BY updated_at ASC`
+    )
+    .all(userId) as SessionMetaRow[];
+  return rows.map(rowToSessionMeta);
+}
+
+/** Upsert one session-metadata row. */
+export function upsertSessionMeta(
+  userId: string,
+  meta: StoredSessionMeta
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO session_meta (
+         id, user_id, type, lesson_id, lesson_title, duration_minutes,
+         completed_steps, total_steps, stars_earned, corrections_count,
+         timed_out, updated_at
+       ) VALUES (
+         @id, @userId, @type, @lessonId, @lessonTitle, @durationMinutes,
+         @completedSteps, @totalSteps, @starsEarned, @correctionsCount,
+         @timedOut, @updatedAt
+       )
+       ON CONFLICT(id) DO UPDATE SET
+         type = excluded.type,
+         lesson_id = excluded.lesson_id,
+         lesson_title = excluded.lesson_title,
+         duration_minutes = excluded.duration_minutes,
+         completed_steps = excluded.completed_steps,
+         total_steps = excluded.total_steps,
+         stars_earned = excluded.stars_earned,
+         corrections_count = excluded.corrections_count,
+         timed_out = excluded.timed_out,
+         updated_at = excluded.updated_at`
+    )
+    .run({
+      id: meta.id,
+      userId,
+      type: meta.type === "lesson" ? "lesson" : "chat",
+      lessonId: meta.lessonId ?? null,
+      lessonTitle: meta.lessonTitle ?? null,
+      durationMinutes: meta.durationMinutes ?? null,
+      completedSteps: meta.completedSteps ?? null,
+      totalSteps: meta.totalSteps ?? null,
+      starsEarned: meta.starsEarned ?? null,
+      correctionsCount: meta.correctionsCount ?? null,
+      timedOut: meta.timedOut ? 1 : 0,
+      updatedAt: meta.updatedAt,
+    });
+}
+
+export function deleteSessionMeta(userId: string, id: string): number {
+  return getDb()
+    .prepare("DELETE FROM session_meta WHERE user_id = ? AND id = ?")
+    .run(userId, id).changes;
+}
+
+export function deleteAllSessionMeta(userId: string): number {
+  return getDb()
+    .prepare("DELETE FROM session_meta WHERE user_id = ?")
+    .run(userId).changes;
 }

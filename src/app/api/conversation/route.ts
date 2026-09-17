@@ -1,6 +1,6 @@
 import { transcribeAudio } from "@/lib/asr";
 import { getAIResponse } from "@/lib/llm";
-import { synthesizeSpeechEdge } from "@/lib/tts";
+import { synthesizeSpeechEdge, voiceForAccent } from "@/lib/tts";
 import { buildLessonMessages, type HistoryMessage } from "@/lib/prompts";
 import { LESSON_STEPS, type LessonProgress } from "@/lib/lessonPlan";
 import { getCurrentUser } from "@/lib/auth";
@@ -37,6 +37,8 @@ export async function POST(request: Request) {
     const audio = formData.get("audio");
     const history = parseHistory(formData.get("history"));
     const mode = (formData.get("mode") as string) || "chat";
+    const accentRaw = formData.get("accent");
+    const accent = typeof accentRaw === "string" ? accentRaw : null;
     const stepIndexRaw = formData.get("stepIndex") as string;
     const stepIndex = stepIndexRaw ? parseInt(stepIndexRaw, 10) : 0;
     const progressRaw = formData.get("progress") as string;
@@ -104,7 +106,10 @@ export async function POST(request: Request) {
       // Step 3: Text → speech (Edge TTS, free). Failure is non-fatal: the
     // response still succeeds with text/feedback but no audio.
     console.log("🔊 [conversation] Step 3: Synthesizing speech (Edge TTS)…");
-    const audioBuffer = await synthesizeSpeechEdge(feedback.reply);
+    const audioBuffer = await synthesizeSpeechEdge(
+      feedback.reply,
+      voiceForAccent(accent)
+    );
     const audioBase64 = audioBuffer ? audioBuffer.toString("base64") : null;
     console.log(
       audioBase64

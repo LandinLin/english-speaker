@@ -66,6 +66,10 @@ export const LESSON_TOTAL_DURATION = LESSON_STEPS.reduce(
   0
 ); // 600 seconds = 10 minutes
 
+/** Stable identity of the (currently single) lesson, stored in history. */
+export const LESSON_ID = "a-is-for-apple";
+export const LESSON_TITLE = "A is for Apple";
+
 /** Friendly AI teacher avatar shown in the lesson header. */
 export const TEACHER_AVATAR_URL =
   "https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?image_size=square_hd&prompt=" +
@@ -84,6 +88,8 @@ export interface LessonProgress {
   elapsedSec: number;
   /** Number of completed speaking turns per step — gates the Next button. */
   stepTurns: number[];
+  /** Canonical session id shared with messageStore/history for this lesson. */
+  sessionId?: string;
 }
 
 /** Per-user progress key (resolved at call time, not module load). */
@@ -126,6 +132,7 @@ export function resetLessonProgress(): LessonProgress {
   const fresh: LessonProgress = {
     ...DEFAULT_PROGRESS,
     startedAt: Date.now(),
+    sessionId: undefined,
   };
   saveLessonProgress(fresh);
   return fresh;

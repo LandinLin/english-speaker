@@ -8,8 +8,30 @@ import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 // generates the required Sec-MS-GEC token) is used instead.
 // ---------------------------------------------------------------------------
 
-const EDGE_VOICE = "en-US-AnaNeural"; // kid-friendly, child-like female voice
 const EDGE_TIMEOUT_MS = 20_000;
+
+// ---------------------------------------------------------------------------
+// Teacher accents. US/UK use child-like Neural voices where available; AU/IN
+// use warm adult female voices (Microsoft ships no child voices for those
+// locales). The mapping lives server-side so only accent ids cross the API.
+// ---------------------------------------------------------------------------
+
+export type AccentId = "us" | "uk" | "au" | "in";
+
+export const ACCENT_VOICES: Record<AccentId, string> = {
+  us: "en-US-AnaNeural", // child, friendly
+  uk: "en-GB-MaisieNeural", // child, British
+  au: "en-AU-NatashaNeural", // warm female, Australian
+  in: "en-IN-NeerjaNeural", // warm female, Indian
+};
+
+/** Resolve a client-supplied accent id to an Edge voice, defaulting to US. */
+export function voiceForAccent(accent?: string | null): string {
+  if (accent && accent in ACCENT_VOICES) {
+    return ACCENT_VOICES[accent as AccentId];
+  }
+  return ACCENT_VOICES.us;
+}
 
 /** Escape text for safe insertion into an SSML document. */
 function escapeXml(text: string): string {
@@ -30,7 +52,8 @@ function escapeXml(text: string): string {
  *          audio is returned).
  */
 export async function synthesizeSpeechEdge(
-  text: string
+  text: string,
+  voice: string = ACCENT_VOICES.us
 ): Promise<Buffer | null> {
   const trimmed = text?.trim();
   if (!trimmed) return null;
@@ -39,7 +62,7 @@ export async function synthesizeSpeechEdge(
   try {
     tts = new MsEdgeTTS();
     await tts.setMetadata(
-      EDGE_VOICE,
+      voice,
       OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3
     );
 

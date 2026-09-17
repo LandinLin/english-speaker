@@ -25,20 +25,49 @@ export interface ExchangeInput {
   audioBase64?: string;
 }
 
-export interface Session {
+export type SessionType = "chat" | "lesson";
+
+/** Lesson-specific results stored alongside the session. */
+export interface SessionLessonFields {
+  lessonId?: string;
+  lessonTitle?: string;
+  durationMinutes?: number;
+  completedSteps?: number;
+  totalSteps?: number;
+  starsEarned?: number;
+  correctionsCount?: number;
+  /** True when the 10-minute timer expired before the lesson finished. */
+  timedOut?: boolean;
+}
+
+/** Persisted session metadata (mirrors the session_meta DB table). */
+export interface SessionMeta extends SessionLessonFields {
+  id: string;
+  type: SessionType;
+  updatedAt: number;
+}
+
+export interface Session extends SessionLessonFields {
   id: string;
   startedAt: number;
   messages: ChatMessage[];
+  /** Sessions without a metadata row are legacy chats. */
+  type: SessionType;
 }
 
 /** Canonical storage: grouped, versioned sessions (per user). */
 const SESSIONS_BASE = "english-buddy:sessions";
+/** Per-session metadata (chat/lesson typing + lesson results). */
+const SESSION_META_BASE = "english-buddy:session-meta";
 /** Older app versions kept a flat message list here; migrated on first load. */
 const LEGACY_MESSAGES_BASE = "english-buddy:messages";
 const PENDING_BASE = "english-buddy:pending-new-session";
 
 function sessionsKey(): string {
   return scopedKey(SESSIONS_BASE);
+}
+function sessionMetaKey(): string {
+  return scopedKey(SESSION_META_BASE);
 }
 function legacyMessagesKey(): string {
   return scopedKey(LEGACY_MESSAGES_BASE);
@@ -56,6 +85,7 @@ const FALSE = false;
 
 let cachedMessages: ChatMessage[] | null = null;
 let cachedPending: boolean | null = null;
+let cachedMeta: SessionMeta[] | null = null;
 const listeners = new Set<() => void>();
 
 function uid(): string {
@@ -181,6 +211,108 @@ function getServerMessagesSnapshot(): ChatMessage[] {
   return EMPTY;
 }
 
+// ---------------------------------------------------------------------------
+// Session metadata (chat/lesson typing + lesson result fields)
+// ---------------------------------------------------------------------------
+
+const META_NUMBER_FIELDS = [
+  "durationMinutes",
+  "completedSteps",
+  "totalSteps",
+  "starsEarned",
+  "correctionsCount",
+] as const;
+
+const META_STRING_FIELDS = ["lessonId", "lessonTitle"] as const;
+
+function normalizeSessionMeta(m: unknown): SessionMeta | null {
+  if (m === null || typeof m !== "object") return null;
+  const row = m as Record<string, unknown>;
+  if (typeof row.id !== "string") return null;
+  if (row.type !== "chat" && row.type !== "lesson") return null;
+  if (typeof row.updatedAt !== "number") return null;
+
+  const meta: SessionMeta = {
+    id: row.id,
+    type: row.type,
+    updatedAt: row.updatedAt,
+  };
+  const target = meta as unknown as Record<string, unknown>;
+  for (const field of META_STRING_FIELDS) {
+    if (typeof row[field] === "string") {
+      target[field] = row[field];
+    }
+  }
+  for (const field of META_NUMBER_FIELDS) {
+    if (typeof row[field] === "number") {
+      target[field] = row[field];
+    }
+  }
+  if (row.timedOut === true) meta.timedOut = true;
+  return meta;
+}
+
+function loadSessionMeta(): SessionMeta[] {
+  try {
+    const raw = localStorage.getItem(sessionMetaKey());
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(normalizeSessionMeta)
+      .filter((m): m is SessionMeta => m !== null);
+  } catch {
+    return [];
+  }
+}
+
+function getMetaSnapshot(): SessionMeta[] {
+  if (cachedMeta === null) {
+    cachedMeta = loadSessionMeta();
+  }
+  return cachedMeta;
+}
+
+function persistMeta(next: SessionMeta[]): void {
+  cachedMeta = next;
+  try {
+    localStorage.setItem(sessionMetaKey(), JSON.stringify(next));
+  } catch (err) {
+    console.error("💾 [store] Failed to persist session meta:", err);
+  }
+}
+
+function serverPostMeta(sessions: SessionMeta[]): void {
+  if (sessions.length === 0) return;
+  void fetch("/api/sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessions }),
+  }).catch((err) => {
+    console.error("🗄️ [store] Session meta save failed:", err);
+  });
+}
+
+function serverDeleteMeta(id?: string): void {
+  const url = id
+    ? `/api/sessions?id=${encodeURIComponent(id)}`
+    : "/api/sessions?all=1";
+  void fetch(url, { method: "DELETE" }).catch((err) => {
+    console.error("🗄️ [store] Session meta delete failed:", err);
+  });
+}
+
+/** Create or update a session's metadata (e.g. lesson start/results). */
+export function saveSessionMeta(input: SessionMeta): void {
+  const meta = normalizeSessionMeta(input);
+  if (!meta) return;
+  const current = getMetaSnapshot();
+  const others = current.filter((m) => m.id !== meta.id);
+  persistMeta([...others, meta]);
+  emit();
+  serverPostMeta([meta]);
+}
+
 function getPendingSnapshot(): boolean {
   if (cachedPending === null) {
     cachedPending = localStorage.getItem(pendingKey()) === "1";
@@ -235,12 +367,46 @@ function serverSync(): void {
   syncStarted = true;
   void (async () => {
     try {
-      const res = await fetch("/api/messages", { cache: "no-store" });
+      const [msgsRes, metaRes] = await Promise.all([
+        fetch("/api/messages", { cache: "no-store" }),
+        fetch("/api/sessions", { cache: "no-store" }),
+      ]);
       // 401 is expected before login / after logout — authStore re-runs the
       // sync when the user changes, so skip silently instead of erroring.
-      if (res.status === 401) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: { messages?: ChatMessage[] } = await res.json();
+      if (msgsRes.status === 401 || metaRes.status === 401) return;
+      if (!msgsRes.ok) throw new Error(`messages HTTP ${msgsRes.status}`);
+
+      // ── Session metadata ──────────────────────────────────────────────
+      if (metaRes.ok) {
+        const metaData: { sessions?: SessionMeta[] } = await metaRes.json();
+        const serverMeta = Array.isArray(metaData.sessions)
+          ? metaData.sessions
+              .map(normalizeSessionMeta)
+              .filter((m): m is SessionMeta => m !== null)
+          : [];
+        const localMeta = getMetaSnapshot();
+        const byId = new Map<string, SessionMeta>();
+        for (const m of localMeta) byId.set(m.id, m);
+        for (const m of serverMeta) byId.set(m.id, m);
+        const mergedMeta = [...byId.values()].sort(
+          (a, b) => a.updatedAt - b.updatedAt
+        );
+        const metaChanged =
+          mergedMeta.length !== localMeta.length ||
+          mergedMeta.some(
+            (m, i) =>
+              m !== localMeta[i] ||
+              JSON.stringify(m) !== JSON.stringify(localMeta[i])
+          );
+        if (metaChanged) persistMeta(mergedMeta);
+        // Push local-only meta (saved while offline) to the server.
+        const localOnly = localMeta.filter(
+          (m) => !serverMeta.some((s) => s.id === m.id)
+        );
+        if (localOnly.length > 0) serverPostMeta(localOnly);
+      }
+
+      const data: { messages?: ChatMessage[] } = await msgsRes.json();
       const serverMessages = Array.isArray(data.messages)
         ? data.messages
         : [];
@@ -381,6 +547,7 @@ function markPending(value: boolean): void {
 export function resetForUserChange(): void {
   cachedMessages = null;
   cachedPending = null;
+  cachedMeta = null;
   syncStarted = false;
   emit();
   if (typeof window !== "undefined") serverSync();
@@ -450,6 +617,25 @@ export function appendNotice(text: string): void {
   serverPost([notice]);
 }
 
+/**
+ * Merge externally-created messages (e.g. lesson exchanges that keep their
+ * own in-lesson transcript) into the canonical store so they appear in
+ * history and stats. De-duplicates by id.
+ */
+export function ingestExternalMessages(incoming: ChatMessage[]): void {
+  if (incoming.length === 0) return;
+  const valid = incoming.filter(isValidMessage);
+  if (valid.length === 0) return;
+  const existing = getMessagesSnapshot();
+  const known = new Set(existing.map((m) => m.id));
+  const fresh = valid.filter((m) => !known.has(m.id));
+  if (fresh.length === 0) return;
+  const merged = [...existing, ...fresh].sort((a, b) => a.createdAt - b.createdAt);
+  persist(merged);
+  emit();
+  serverPost(fresh);
+}
+
 export function beginNewSession(): void {
   markPending(true);
   emit();
@@ -457,17 +643,21 @@ export function beginNewSession(): void {
 
 export function clearAllMessages(): void {
   persist([]);
+  persistMeta([]);
   markPending(false);
   emit();
   serverDelete();
+  serverDeleteMeta();
 }
 
 export function deleteSession(sessionId: string): void {
   persist(
     getMessagesSnapshot().filter((m) => m.sessionId !== sessionId)
   );
+  persistMeta(getMetaSnapshot().filter((m) => m.id !== sessionId));
   emit();
   serverDelete(sessionId);
+  serverDeleteMeta(sessionId);
 }
 
 /** Cache a lazily re-fetched voice clip back onto its message. */
@@ -481,20 +671,61 @@ export function setMessageAudio(id: string, audioBase64: string): void {
   serverPatchAudio(id, audioBase64);
 }
 
-/** Group the flat message list into sessions, oldest first. */
+/** Group the flat message list into sessions, oldest first, merging metadata. */
 export function selectSessions(messages: ChatMessage[]): Session[] {
+  const metaById = new Map(getMetaSnapshot().map((m) => [m.id, m]));
   const sessions: Session[] = [];
   for (const message of messages) {
     const current = sessions[sessions.length - 1];
     if (current && current.id === message.sessionId) {
       current.messages.push(message);
     } else {
+      const meta = metaById.get(message.sessionId);
       sessions.push({
         id: message.sessionId,
         startedAt: message.createdAt,
         messages: [message],
+        // Backward compatibility: sessions without metadata are chats.
+        type: meta?.type ?? "chat",
+        ...(meta?.lessonId !== undefined
+          ? { lessonId: meta.lessonId }
+          : {}),
+        ...(meta?.lessonTitle !== undefined
+          ? { lessonTitle: meta.lessonTitle }
+          : {}),
+        ...(meta?.durationMinutes !== undefined
+          ? { durationMinutes: meta.durationMinutes }
+          : {}),
+        ...(meta?.completedSteps !== undefined
+          ? { completedSteps: meta.completedSteps }
+          : {}),
+        ...(meta?.totalSteps !== undefined
+          ? { totalSteps: meta.totalSteps }
+          : {}),
+        ...(meta?.starsEarned !== undefined
+          ? { starsEarned: meta.starsEarned }
+          : {}),
+        ...(meta?.correctionsCount !== undefined
+          ? { correctionsCount: meta.correctionsCount }
+          : {}),
+        ...(meta?.timedOut !== undefined
+          ? { timedOut: meta.timedOut }
+          : {}),
       });
     }
   }
   return sessions;
+}
+
+/**
+ * The chat tab shows the latest CHAT session — lesson sessions live in their
+ * own mode and must never leak into the chat transcript.
+ */
+export function lastChatSessionId(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const sid = messages[i].sessionId;
+    const meta = getMetaSnapshot().find((m) => m.id === sid);
+    if ((meta?.type ?? "chat") === "chat") return sid;
+  }
+  return null;
 }

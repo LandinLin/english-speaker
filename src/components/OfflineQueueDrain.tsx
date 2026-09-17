@@ -38,6 +38,7 @@ async function drainQueue(): Promise<void> {
           })
         );
         formData.append("history", JSON.stringify(item.history ?? []));
+        if (item.accent) formData.append("accent", item.accent);
 
         const res = await fetch("/api/conversation", {
           method: "POST",

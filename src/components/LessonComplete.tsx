@@ -8,6 +8,8 @@ import type { Badge, LearningStats } from "@/lib/badges";
 interface Props {
   stats: LearningStats;
   newBadges: Badge[];
+  /** Stars earned in THIS lesson (3 = perfect, 2 = completed). */
+  stars?: number;
   onPlayAgain: () => void;
   onExit: () => void;
 }
@@ -15,11 +17,18 @@ interface Props {
 export default function LessonComplete({
   stats,
   newBadges,
+  stars,
   onPlayAgain,
   onExit,
 }: Props) {
-  // Star rating: 3 stars for perfect, 2 for completing, 1 always
-  const stars = stats.perfectLessons > 0 ? 3 : 2;
+  // Star rating: caller passes this lesson's result; fall back to the legacy
+  // global-stats heuristic for older callers.
+  const starCount =
+    typeof stars === "number" && stars > 0
+      ? stars
+      : stats.perfectLessons > 0
+        ? 3
+        : 2;
 
   useEffect(() => {
     const fire = () =>
@@ -82,7 +91,7 @@ export default function LessonComplete({
               initial={{ scale: 0, rotate: -30 }}
               animate={{ scale: 1, rotate: 0 }}
               transition={{ delay: 0.3 + i * 0.15, type: "spring", stiffness: 200 }}
-              className={`text-5xl ${i < stars ? "" : "opacity-20 grayscale"}`}
+              className={`text-5xl ${i < starCount ? "" : "opacity-20 grayscale"}`}
             >
               ⭐
             </motion.span>

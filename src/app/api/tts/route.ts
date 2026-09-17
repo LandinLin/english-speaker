@@ -1,4 +1,4 @@
-import { synthesizeSpeechEdge } from "@/lib/tts";
+import { synthesizeSpeechEdge, voiceForAccent } from "@/lib/tts";
 import { getCurrentUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -14,17 +14,21 @@ export async function POST(request: Request) {
     }
 
     const body: unknown = await request.json();
-    const text =
-      body && typeof body === "object" && "text" in body
-        ? String((body as { text: unknown }).text ?? "").trim()
-        : "";
+    const bodyObj =
+      body && typeof body === "object"
+        ? (body as { text?: unknown; accent?: unknown })
+        : null;
+    const text = bodyObj ? String(bodyObj.text ?? "").trim() : "";
+    const accent =
+      typeof bodyObj?.accent === "string" ? bodyObj.accent : null;
 
     if (!text) {
       return Response.json({ error: "Missing text" }, { status: 400 });
     }
 
     const audioBuffer = await synthesizeSpeechEdge(
-      text.slice(0, MAX_TEXT_LENGTH)
+      text.slice(0, MAX_TEXT_LENGTH),
+      voiceForAccent(accent)
     );
     if (!audioBuffer) {
       return Response.json(
