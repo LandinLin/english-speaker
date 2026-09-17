@@ -11,26 +11,54 @@ import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 const EDGE_TIMEOUT_MS = 20_000;
 
 // ---------------------------------------------------------------------------
-// Teacher accents. US/UK use child-like Neural voices where available; AU/IN
-// use warm adult female voices (Microsoft ships no child voices for those
-// locales). The mapping lives server-side so only accent ids cross the API.
+// Teacher accents × genders. US/UK use child-like female Neural voices where
+// available; AU/IN use warm adult female voices (Microsoft ships no child
+// voices for those locales). Male voices are warm adult voices. The mapping
+// lives server-side so only accent/gender ids cross the API.
 // ---------------------------------------------------------------------------
 
 export type AccentId = "us" | "uk" | "au" | "in";
+export type GenderId = "female" | "male";
 
-export const ACCENT_VOICES: Record<AccentId, string> = {
-  us: "en-US-AnaNeural", // child, friendly
-  uk: "en-GB-MaisieNeural", // child, British
-  au: "en-AU-NatashaNeural", // warm female, Australian
-  in: "en-IN-NeerjaNeural", // warm female, Indian
+export const VOICE_MAP: Record<AccentId, Record<GenderId, string>> = {
+  us: {
+    female: "en-US-AnaNeural", // child, friendly
+    male: "en-US-BrianNeural", // warm, younger-sounding male
+  },
+  uk: {
+    female: "en-GB-MaisieNeural", // child, British
+    male: "en-GB-RyanNeural", // warm British male
+  },
+  au: {
+    female: "en-AU-NatashaNeural", // warm female, Australian
+    male: "en-AU-WilliamNeural", // relaxed Aussie male
+  },
+  in: {
+    female: "en-IN-NeerjaNeural", // warm female, Indian
+    male: "en-IN-PrabhatNeural", // warm Indian male
+  },
 };
 
-/** Resolve a client-supplied accent id to an Edge voice, defaulting to US. */
-export function voiceForAccent(accent?: string | null): string {
-  if (accent && accent in ACCENT_VOICES) {
-    return ACCENT_VOICES[accent as AccentId];
+/** Default voice (US female) used when ids are missing or unknown. */
+export const DEFAULT_VOICE = VOICE_MAP.us.female;
+
+function isAccentId(value: unknown): value is AccentId {
+  return value === "us" || value === "uk" || value === "au" || value === "in";
+}
+
+function isGenderId(value: unknown): value is GenderId {
+  return value === "female" || value === "male";
+}
+
+/** Resolve client-supplied accent/gender ids to an Edge voice. */
+export function getVoiceForAccent(
+  accent?: string | null,
+  gender?: string | null
+): string {
+  if (isAccentId(accent)) {
+    return VOICE_MAP[accent][isGenderId(gender) ? gender : "female"];
   }
-  return ACCENT_VOICES.us;
+  return DEFAULT_VOICE;
 }
 
 /** Escape text for safe insertion into an SSML document. */
@@ -46,6 +74,9 @@ function escapeXml(text: string): string {
 /**
  * Synthesize speech with Edge TTS.
  *
+ * Accepts accent/gender ids (resolved through VOICE_MAP) or an explicit voice
+ * name. Unknown values fall back to the default US female voice.
+ *
  * @returns MP3 audio buffer, or `null` when synthesis fails. Failures are
  *          logged but never thrown so the conversation can continue with a
  *          text-only reply (the frontend already skips playback when no
@@ -53,10 +84,13 @@ function escapeXml(text: string): string {
  */
 export async function synthesizeSpeechEdge(
   text: string,
-  voice: string = ACCENT_VOICES.us
+  accent?: string | null,
+  gender?: string | null
 ): Promise<Buffer | null> {
   const trimmed = text?.trim();
   if (!trimmed) return null;
+
+  const voice = getVoiceForAccent(accent, gender);
 
   let tts: MsEdgeTTS | null = null;
   try {

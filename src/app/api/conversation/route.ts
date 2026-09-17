@@ -1,6 +1,6 @@
 import { transcribeAudio } from "@/lib/asr";
 import { getAIResponse } from "@/lib/llm";
-import { synthesizeSpeechEdge, voiceForAccent } from "@/lib/tts";
+import { synthesizeSpeechEdge } from "@/lib/tts";
 import { buildLessonMessages, type HistoryMessage } from "@/lib/prompts";
 import { LESSON_STEPS, type LessonProgress } from "@/lib/lessonPlan";
 import { getCurrentUser } from "@/lib/auth";
@@ -39,6 +39,8 @@ export async function POST(request: Request) {
     const mode = (formData.get("mode") as string) || "chat";
     const accentRaw = formData.get("accent");
     const accent = typeof accentRaw === "string" ? accentRaw : null;
+    const genderRaw = formData.get("gender");
+    const gender = typeof genderRaw === "string" ? genderRaw : null;
     const stepIndexRaw = formData.get("stepIndex") as string;
     const stepIndex = stepIndexRaw ? parseInt(stepIndexRaw, 10) : 0;
     const progressRaw = formData.get("progress") as string;
@@ -77,7 +79,7 @@ export async function POST(request: Request) {
         // use defaults
       }
       const messages = buildLessonMessages(step, progress, transcript, history);
-      feedback = await getAIResponse(transcript, history, messages);
+      feedback = await getAIResponse(transcript, history, messages, accent);
 
       const nextStepIndex =
         stepIndex + 1 < LESSON_STEPS.length ? stepIndex + 1 : null;
@@ -90,7 +92,7 @@ export async function POST(request: Request) {
       };
       console.log(`📚 [conversation] Lesson mode: step ${stepIndex + 1}/${LESSON_STEPS.length} (${step.id})`);
     } else {
-      feedback = await getAIResponse(transcript, history);
+      feedback = await getAIResponse(transcript, history, undefined, accent);
     }
     console.log("💬 [conversation] AI reply:", feedback.reply);
 
@@ -108,7 +110,8 @@ export async function POST(request: Request) {
     console.log("🔊 [conversation] Step 3: Synthesizing speech (Edge TTS)…");
     const audioBuffer = await synthesizeSpeechEdge(
       feedback.reply,
-      voiceForAccent(accent)
+      accent,
+      gender
     );
     const audioBase64 = audioBuffer ? audioBuffer.toString("base64") : null;
     console.log(

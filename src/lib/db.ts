@@ -41,6 +41,8 @@ export interface StoredSessionMeta {
   correctionsCount?: number;
   /** True when the 10-minute timer expired before the lesson finished. */
   timedOut?: boolean;
+  /** Teacher accent used in this session ("us" | "uk" | "au" | "in"). */
+  accent?: string;
   updatedAt: number;
 }
 
@@ -56,6 +58,7 @@ interface SessionMetaRow {
   stars_earned: number | null;
   corrections_count: number | null;
   timed_out: number | null;
+  accent: string | null;
   updated_at: number;
 }
 
@@ -93,10 +96,11 @@ function getDb(): Database.Database {
 // transaction with rollback on failure.
 //   v1 → v2: users + auth_sessions + messages.user_id
 //   v2 → v3: session_meta (chat/lesson typing + lesson results)
+//   v3 → v4: session_meta.accent (teacher voice used in the session)
 // ---------------------------------------------------------------------------
 function migrate(database: Database.Database, dbPath: string): void {
   let userVersion = database.pragma("user_version", { simple: true }) as number;
-  if (userVersion >= 3) return;
+  if (userVersion >= 4) return;
 
   const backup = (targetVersion: number) => {
     if (!fs.existsSync(dbPath)) return;
@@ -181,6 +185,30 @@ function migrate(database: Database.Database, dbPath: string): void {
       console.log("✅ [db] Migration to v3 complete (session_meta)");
     } catch (err) {
       console.error("❌ [db] v3 migration failed (rolled back):", err);
+      throw err;
+    }
+  }
+
+  // ── v3 → v4 ──────────────────────────────────────────────────────────
+  if (userVersion < 4) {
+    backup(4);
+    const v4 = database.transaction(() => {
+      const hasAccentColumn = (
+        database.prepare("PRAGMA table_info(session_meta)").all() as { name: string }[]
+      ).some((col) => col.name === "accent");
+      if (!hasAccentColumn) {
+        database.exec(
+          "ALTER TABLE session_meta ADD COLUMN accent TEXT"
+        );
+      }
+      database.pragma("user_version = 4");
+    });
+
+    try {
+      v4();
+      console.log("✅ [db] Migration to v4 complete (session_meta.accent)");
+    } catch (err) {
+      console.error("❌ [db] v4 migration failed (rolled back):", err);
       throw err;
     }
   }
@@ -432,6 +460,7 @@ function rowToSessionMeta(row: SessionMetaRow): StoredSessionMeta {
       ? { correctionsCount: row.corrections_count }
       : {}),
     ...(row.timed_out === 1 ? { timedOut: true } : {}),
+    ...(row.accent !== null ? { accent: row.accent } : {}),
     updatedAt: row.updated_at,
   };
 }
@@ -442,7 +471,7 @@ export function listSessionMeta(userId: string): StoredSessionMeta[] {
     .prepare(
       `SELECT id, user_id, type, lesson_id, lesson_title, duration_minutes,
               completed_steps, total_steps, stars_earned, corrections_count,
-              timed_out, updated_at
+              timed_out, accent, updated_at
        FROM session_meta WHERE user_id = ? ORDER BY updated_at ASC`
     )
     .all(userId) as SessionMetaRow[];
@@ -459,11 +488,11 @@ export function upsertSessionMeta(
       `INSERT INTO session_meta (
          id, user_id, type, lesson_id, lesson_title, duration_minutes,
          completed_steps, total_steps, stars_earned, corrections_count,
-         timed_out, updated_at
+         timed_out, accent, updated_at
        ) VALUES (
          @id, @userId, @type, @lessonId, @lessonTitle, @durationMinutes,
          @completedSteps, @totalSteps, @starsEarned, @correctionsCount,
-         @timedOut, @updatedAt
+         @timedOut, @accent, @updatedAt
        )
        ON CONFLICT(id) DO UPDATE SET
          type = excluded.type,
@@ -475,6 +504,7 @@ export function upsertSessionMeta(
          stars_earned = excluded.stars_earned,
          corrections_count = excluded.corrections_count,
          timed_out = excluded.timed_out,
+         accent = excluded.accent,
          updated_at = excluded.updated_at`
     )
     .run({
@@ -489,6 +519,7 @@ export function upsertSessionMeta(
       starsEarned: meta.starsEarned ?? null,
       correctionsCount: meta.correctionsCount ?? null,
       timedOut: meta.timedOut ? 1 : 0,
+      accent: meta.accent ?? null,
       updatedAt: meta.updatedAt,
     });
 }

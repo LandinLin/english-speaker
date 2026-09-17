@@ -19,6 +19,8 @@ interface ConversationResponse {
   aiText?: string;
   feedback?: { praise?: string; correction?: string; newWord?: string };
   audioBase64?: string;
+  /** Echoed from the queued item so the chat can tag the session meta. */
+  accent?: string;
 }
 
 async function drainQueue(): Promise<void> {
@@ -39,6 +41,7 @@ async function drainQueue(): Promise<void> {
         );
         formData.append("history", JSON.stringify(item.history ?? []));
         if (item.accent) formData.append("accent", item.accent);
+        if (item.gender) formData.append("gender", item.gender);
 
         const res = await fetch("/api/conversation", {
           method: "POST",
@@ -46,6 +49,8 @@ async function drainQueue(): Promise<void> {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as ConversationResponse;
+        // Remember which accent this answer used for the history card flag.
+        if (item.accent) data.accent = item.accent;
 
         await removeQueuedExchange(item.id);
         window.dispatchEvent(

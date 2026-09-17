@@ -23,6 +23,8 @@ export interface ExchangeInput {
   correction?: string;
   newWord?: string;
   audioBase64?: string;
+  /** Teacher accent used for this chat exchange (tags session history). */
+  accent?: string;
 }
 
 export type SessionType = "chat" | "lesson";
@@ -44,6 +46,8 @@ export interface SessionLessonFields {
 export interface SessionMeta extends SessionLessonFields {
   id: string;
   type: SessionType;
+  /** Teacher accent used in this session, for the flag on history cards. */
+  accent?: string;
   updatedAt: number;
 }
 
@@ -53,6 +57,7 @@ export interface Session extends SessionLessonFields {
   messages: ChatMessage[];
   /** Sessions without a metadata row are legacy chats. */
   type: SessionType;
+  accent?: string;
 }
 
 /** Canonical storage: grouped, versioned sessions (per user). */
@@ -223,7 +228,7 @@ const META_NUMBER_FIELDS = [
   "correctionsCount",
 ] as const;
 
-const META_STRING_FIELDS = ["lessonId", "lessonTitle"] as const;
+const META_STRING_FIELDS = ["lessonId", "lessonTitle", "accent"] as const;
 
 function normalizeSessionMeta(m: unknown): SessionMeta | null {
   if (m === null || typeof m !== "object") return null;
@@ -594,6 +599,16 @@ export function addExchange(input: ExchangeInput): {
   persist([...getMessagesSnapshot(), user, ai]);
   emit();
   serverPost([user, ai]);
+  // Tag free-chat sessions with the accent used so History can show the flag.
+  // Latest selection wins (changing accent takes effect on the next message).
+  if (input.accent) {
+    saveSessionMeta({
+      id: sessionId,
+      type: "chat",
+      accent: input.accent,
+      updatedAt: now,
+    });
+  }
   return { user, ai };
 }
 
@@ -711,6 +726,7 @@ export function selectSessions(messages: ChatMessage[]): Session[] {
         ...(meta?.timedOut !== undefined
           ? { timedOut: meta.timedOut }
           : {}),
+        ...(meta?.accent !== undefined ? { accent: meta.accent } : {}),
       });
     }
   }

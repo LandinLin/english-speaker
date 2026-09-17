@@ -12,6 +12,7 @@ import {
   useMessages,
   type Session,
 } from "@/lib/messageStore";
+import { ACCENTS } from "@/lib/accentStore";
 
 type FilterId = "all" | "chats" | "lessons";
 
@@ -51,6 +52,21 @@ function sessionPreview(session: Session): string {
   const firstUser = session.messages.find((m) => m.role === "user");
   const text = firstUser?.text.trim() || "Chat with English Buddy";
   return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
+/** Flag emoji for the accent used in a session, if known. */
+function AccentFlag({ session }: { session: Session }) {
+  const def = ACCENTS.find((a) => a.id === session.accent);
+  if (!def) return null;
+  return (
+    <span
+      title={`${def.label} teacher`}
+      aria-label={`${def.label} teacher`}
+      className="shrink-0 text-sm leading-none"
+    >
+      {def.emoji}
+    </span>
+  );
 }
 
 /** ⭐⭐☆-style rating, or a status pill for unfinished lessons. */
@@ -136,10 +152,13 @@ function SessionCard({ session }: { session: Session }) {
             {expanded ? "📂" : isLesson ? "📚" : "💬"}
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-medium text-gray-800">
-              {isLesson
-                ? session.lessonTitle || "English Lesson"
-                : sessionPreview(session)}
+            <span className="flex items-center gap-1.5">
+              <span className="truncate text-sm font-medium text-gray-800">
+                {isLesson
+                  ? session.lessonTitle || "English Lesson"
+                  : sessionPreview(session)}
+              </span>
+              <AccentFlag session={session} />
             </span>
             <span className="mt-0.5 block text-xs">
               {isLesson ? (

@@ -5,6 +5,30 @@ export interface HistoryMessage {
   content: string;
 }
 
+// ---------------------------------------------------------------------------
+// Accent style — makes the teacher's written English match the voice the
+// child hears (spelling + light regional vocabulary). Kept subtle so it
+// never confuses a young learner.
+// ---------------------------------------------------------------------------
+
+export const ACCENT_INSTRUCTIONS: Record<string, string> = {
+  us: "Use American English spelling and expressions.",
+  uk: "Use British English spelling (colour, realise) and friendly expressions (lift, queue).",
+  au: "Use Australian English spelling, with cheerful expressions like 'mate' and 'no worries' where natural.",
+  in: "Use clear, neutral English with warm Indian-English conventions like 'kindly' where natural.",
+};
+
+/** System message adapting the tutor's writing style to the chosen accent. */
+export function accentSystemMessage(
+  accent?: string | null
+): { role: "system"; content: string } | null {
+  if (!accent || !(accent in ACCENT_INSTRUCTIONS)) return null;
+  return {
+    role: "system",
+    content: `Speak in the ${accent.toUpperCase()} teacher voice. ${ACCENT_INSTRUCTIONS[accent]} Keep everything simple enough for a young child.`,
+  };
+}
+
 export const TUTOR_SYSTEM_PROMPT = `You are English Buddy, a warm and patient English tutor for children aged 6 to 10.
 
 Rules:

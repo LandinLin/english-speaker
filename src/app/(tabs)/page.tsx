@@ -14,7 +14,7 @@ import {
 } from "@/lib/messageStore";
 import { playClip, stopPlayback } from "@/lib/audioPlayer";
 import { enqueueExchange } from "@/lib/offlineQueue";
-import { useAccent } from "@/lib/accent";
+import { getAccentPreference, useAccent } from "@/lib/accentStore";
 
 interface ConversationResponse {
   transcript?: string;
@@ -25,6 +25,8 @@ interface ConversationResponse {
     newWord?: string;
   };
   audioBase64?: string;
+  /** Present on exchanges drained from the offline outbox. */
+  accent?: string;
   error?: string;
 }
 
@@ -37,7 +39,7 @@ const TOUCH_MOUSE_GRACE_MS = 800;
 export default function ChatPage() {
   const allMessages = useMessages();
   const pendingNew = usePendingNewSession();
-  const accent = useAccent();
+  const { accent, gender } = useAccent();
   const [status, setStatus] = useState<Status>("idle");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -82,6 +84,7 @@ export default function ChatPage() {
       correction: data.feedback?.correction,
       newWord: data.feedback?.newWord,
       audioBase64: data.audioBase64,
+      accent: data.accent ?? getAccentPreference().accent,
     });
     if (ai.audioBase64) {
       playClip(ai.id, `data:audio/mpeg;base64,${ai.audioBase64}`);
@@ -115,7 +118,7 @@ export default function ChatPage() {
     // automatically and the answer arrives via the event listener above.
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       try {
-        await enqueueExchange(blob, historyRef.current, accent);
+        await enqueueExchange(blob, historyRef.current, accent, gender);
         appendNotice(
           "📴 Saved! I'll answer as soon as you're back online."
         );
@@ -134,6 +137,7 @@ export default function ChatPage() {
     );
     formData.append("history", JSON.stringify(historyRef.current));
     formData.append("accent", accent);
+    formData.append("gender", gender);
 
     try {
       const res = await fetch("/api/conversation", {

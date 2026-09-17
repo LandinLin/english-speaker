@@ -25,7 +25,7 @@ import {
   saveSessionMeta,
 } from "@/lib/messageStore";
 import { scopedKey } from "@/lib/userScope";
-import { useAccent } from "@/lib/accent";
+import { useAccent } from "@/lib/accentStore";
 import {
   checkNewBadges,
   type Badge,
@@ -132,7 +132,7 @@ function saveLessonMessages(messages: ChatMessage[]): void {
 
 export default function LessonMode({ onExit }: { onExit: () => void }) {
   const router = useRouter();
-  const accent = useAccent();
+  const { accent, gender } = useAccent();
 
   const [progress, setProgress] = useState<LessonProgress>(() => {
     const loaded = loadLessonProgress();
@@ -312,9 +312,10 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
       totalSteps: LESSON_STEPS.length,
       starsEarned: 0,
       correctionsCount: 0,
+      accent,
       updatedAt: progress.startedAt || Date.now(),
     });
-  }, [progress.sessionId, progress.startedAt]);
+  }, [progress.sessionId, progress.startedAt, accent]);
 
   const addMessage = useCallback(
     (role: "user" | "ai", text: string, extra?: Partial<ChatMessage>) => {
@@ -362,6 +363,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     formData.append("stepIndex", String(stepIndexRef.current));
     formData.append("progress", JSON.stringify(progress));
     formData.append("accent", accent);
+    formData.append("gender", gender);
 
     try {
       const res = await fetch("/api/conversation", {
@@ -446,7 +448,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     } finally {
       setStatus("idle");
     }
-  }, [addMessage, progress, accent]);
+  }, [addMessage, progress, accent, gender]);
 
   const startRecording = useCallback(async () => {
     if (status !== "idle") return;
@@ -534,6 +536,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
       starsEarned: 0,
       correctionsCount,
       timedOut: true,
+      accent,
       updatedAt: Date.now(),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -585,6 +588,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
         totalSteps: LESSON_STEPS.length,
         starsEarned: stars,
         correctionsCount,
+        accent,
         updatedAt: Date.now(),
       });
       setEarnedStars(stars);
@@ -626,7 +630,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
       stepIndex: stepIndexRef.current + 1,
       completedSteps: [...prev.completedSteps, stepIndexRef.current],
     }));
-  }, [isLastStep, messages, stepDone, timedOut, progress.elapsedSec]);
+  }, [isLastStep, messages, stepDone, timedOut, progress.elapsedSec, accent]);
 
   const handlePlayAgain = useCallback(() => {
     stopPlayback();

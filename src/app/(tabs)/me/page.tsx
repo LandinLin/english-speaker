@@ -7,6 +7,7 @@ import { computeStats, dayKey } from "@/lib/stats";
 import { countEarnedBadges } from "@/lib/badges";
 import { logout, useAuth } from "@/lib/authStore";
 import { THEMES, setTheme, useTheme } from "@/lib/theme";
+import AccentPicker from "@/components/AccentPicker";
 
 const WEEK_LETTERS = ["M", "T", "W", "T", "F", "S", "S"] as const;
 
@@ -189,6 +190,9 @@ export default function MePage() {
           })}
         </div>
       </section>
+
+      {/* ── Teacher voice: accent + gender + preview ─────────────────── */}
+      <AccentPicker />
 
       {/* ── This week mini-chart ─────────────────────────────────────── */}
       <section className="mx-auto mt-7 w-full max-w-md px-4">
