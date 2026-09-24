@@ -2,7 +2,7 @@
 
 /**
  * Teacher voice preference, per user ("english-buddy:accent:<uid>").
- * Only the { accent, gender } ids are sent with /api/conversation and
+ * Only the { accent, voice } ids are sent with /api/conversation and
  * /api/tts requests; the server maps them to Edge TTS voices.
  */
 
@@ -10,11 +10,11 @@ import { useSyncExternalStore } from "react";
 import { scopedKey } from "./userScope";
 
 export type AccentId = "us" | "uk" | "au" | "in";
-export type GenderId = "female" | "male";
+export type VoiceTypeId = "male" | "female" | "boy" | "girl";
 
 export interface AccentPreference {
   accent: AccentId;
-  gender: GenderId;
+  voice: VoiceTypeId;
 }
 
 export interface AccentDef {
@@ -25,8 +25,8 @@ export interface AccentDef {
   hint: string;
 }
 
-export interface GenderDef {
-  id: GenderId;
+export interface VoiceTypeDef {
+  id: VoiceTypeId;
   label: string;
   emoji: string;
   /** Compact single-glyph marker used in the header pill. */
@@ -60,14 +60,16 @@ export const ACCENTS: AccentDef[] = [
   },
 ];
 
-export const GENDERS: GenderDef[] = [
-  { id: "female", label: "Female", emoji: "👧", glyph: "♀" },
-  { id: "male", label: "Male", emoji: "👦", glyph: "♂" },
+export const VOICE_TYPES: VoiceTypeDef[] = [
+  { id: "male", label: "Man", emoji: "👨", glyph: "👨" },
+  { id: "female", label: "Woman", emoji: "👩", glyph: "👩" },
+  { id: "boy", label: "Boy", emoji: "👦", glyph: "👦" },
+  { id: "girl", label: "Girl", emoji: "👧", glyph: "👧" },
 ];
 
 export const DEFAULT_ACCENT_PREFERENCE: AccentPreference = {
   accent: "us",
-  gender: "female",
+  voice: "girl",
 };
 
 const ACCENT_BASE = "english-buddy:accent";
@@ -76,8 +78,15 @@ function isAccentId(value: unknown): value is AccentId {
   return ACCENTS.some((accent) => accent.id === value);
 }
 
-function isGenderId(value: unknown): value is GenderId {
-  return value === "female" || value === "male";
+function isVoiceType(value: unknown): value is VoiceTypeId {
+  return value === "male" || value === "female" || value === "boy" || value === "girl";
+}
+
+/** Map the previous female/male preference onto the new voice types. */
+function legacyVoice(value: unknown): VoiceTypeId | null {
+  if (value === "female") return "girl"; // old default used child voices
+  if (value === "male") return "male";
+  return null;
 }
 
 function storageKey(): string {
@@ -85,8 +94,8 @@ function storageKey(): string {
 }
 
 /**
- * Accepts the current object shape and the legacy plain-string value
- * ("us" | "uk" | …) saved by the previous accent-only version.
+ * Accepts the current object shape, the previous { accent, gender } shape,
+ * and the original plain-string accent value.
  */
 function readStored(): AccentPreference {
   if (typeof window === "undefined") return DEFAULT_ACCENT_PREFERENCE;
@@ -94,18 +103,19 @@ function readStored(): AccentPreference {
     const raw = window.localStorage.getItem(storageKey());
     if (!raw) return DEFAULT_ACCENT_PREFERENCE;
     if (isAccentId(raw)) {
-      return { accent: raw, gender: "female" };
+      return { accent: raw, voice: "girl" };
     }
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === "object") {
       const p = parsed as Record<string, unknown>;
+      const migrated = legacyVoice(p.gender);
       return {
         accent: isAccentId(p.accent)
           ? p.accent
           : DEFAULT_ACCENT_PREFERENCE.accent,
-        gender: isGenderId(p.gender)
-          ? p.gender
-          : DEFAULT_ACCENT_PREFERENCE.gender,
+        voice: isVoiceType(p.voice)
+          ? p.voice
+          : migrated ?? DEFAULT_ACCENT_PREFERENCE.voice,
       };
     }
   } catch {
@@ -131,9 +141,9 @@ export function getAccentPreference(): AccentPreference {
 export function setAccentPreference(pref: Partial<AccentPreference>): void {
   const next: AccentPreference = {
     accent: isAccentId(pref.accent) ? pref.accent : current.accent,
-    gender: isGenderId(pref.gender) ? pref.gender : current.gender,
+    voice: isVoiceType(pref.voice) ? pref.voice : current.voice,
   };
-  if (next.accent === current.accent && next.gender === current.gender) return;
+  if (next.accent === current.accent && next.voice === current.voice) return;
   current = next;
   try {
     window.localStorage.setItem(storageKey(), JSON.stringify(next));
@@ -146,7 +156,7 @@ export function setAccentPreference(pref: Partial<AccentPreference>): void {
 /** Re-read the preference after login/logout (the per-user key changes). */
 export function resetAccentPreference(): void {
   const next = readStored();
-  if (next.accent !== current.accent || next.gender !== current.gender) {
+  if (next.accent !== current.accent || next.voice !== current.voice) {
     current = next;
     listeners.forEach((listener) => listener());
   }

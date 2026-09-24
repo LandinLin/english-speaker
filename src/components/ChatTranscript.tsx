@@ -22,7 +22,7 @@ function ListenButton({
   speakText: string;
 }) {
   const playingId = usePlayingMessageId();
-  const { accent, gender } = useAccent();
+  const { accent, voice } = useAccent();
   const [loading, setLoading] = useState(false);
   const isPlaying = playingId === message.id;
 
@@ -41,7 +41,7 @@ function ListenButton({
         const res = await fetch("/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: speakText, accent, gender }),
+          body: JSON.stringify({ text: speakText, accent, voice }),
         });
         const data: { audioBase64?: string; error?: string } =
           await res.json();

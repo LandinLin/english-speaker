@@ -8,7 +8,7 @@ const AUTH_PAGES = new Set(["/login", "/register"]);
 const PROTECTED_PAGES = new Set([
   "/",
   "/lesson",
-  "/video",
+  "/call",
   "/me",
   "/history",
   "/dashboard",

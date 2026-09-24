@@ -39,7 +39,7 @@ const TOUCH_MOUSE_GRACE_MS = 800;
 export default function ChatPage() {
   const allMessages = useMessages();
   const pendingNew = usePendingNewSession();
-  const { accent, gender } = useAccent();
+  const { accent, voice } = useAccent();
   const [status, setStatus] = useState<Status>("idle");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -118,7 +118,7 @@ export default function ChatPage() {
     // automatically and the answer arrives via the event listener above.
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       try {
-        await enqueueExchange(blob, historyRef.current, accent, gender);
+        await enqueueExchange(blob, historyRef.current, accent, voice);
         appendNotice(
           "📴 Saved! I'll answer as soon as you're back online."
         );
@@ -137,7 +137,7 @@ export default function ChatPage() {
     );
     formData.append("history", JSON.stringify(historyRef.current));
     formData.append("accent", accent);
-    formData.append("gender", gender);
+    formData.append("voice", voice);
 
     try {
       const res = await fetch("/api/conversation", {

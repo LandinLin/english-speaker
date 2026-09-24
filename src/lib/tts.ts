@@ -11,54 +11,72 @@ import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 const EDGE_TIMEOUT_MS = 20_000;
 
 // ---------------------------------------------------------------------------
-// Teacher accents × genders. US/UK use child-like female Neural voices where
-// available; AU/IN use warm adult female voices (Microsoft ships no child
-// voices for those locales). Male voices are warm adult voices. The mapping
-// lives server-side so only accent/gender ids cross the API.
+// Teacher accents × voice types (4 × 4 = 16). Edge TTS ships real child
+// voices only for US (Ana) and UK (Maisie) girls, so boy voices — and kid
+// voices for AU/IN — use young adult voices with a raised prosody pitch,
+// which the Edge SSML endpoint supports natively.
 // ---------------------------------------------------------------------------
 
 export type AccentId = "us" | "uk" | "au" | "in";
-export type GenderId = "female" | "male";
+export type VoiceTypeId = "male" | "female" | "boy" | "girl";
 
-export const VOICE_MAP: Record<AccentId, Record<GenderId, string>> = {
+export interface VoiceSpec {
+  voice: string;
+  /** SSML pitch offset, e.g. "+40Hz" (makes adult voices sound younger). */
+  pitch?: string;
+  /** SSML speaking rate, e.g. "+5%" (kids speak a touch faster). */
+  rate?: string;
+}
+
+export const VOICE_MAP: Record<AccentId, Record<VoiceTypeId, VoiceSpec>> = {
   us: {
-    female: "en-US-AnaNeural", // child, friendly
-    male: "en-US-BrianNeural", // warm, younger-sounding male
+    male: { voice: "en-US-GuyNeural" }, // warm adult man
+    female: { voice: "en-US-AriaNeural" }, // warm adult woman
+    boy: { voice: "en-US-BrianNeural", pitch: "+40Hz", rate: "+5%" },
+    girl: { voice: "en-US-AnaNeural" }, // real child voice
   },
   uk: {
-    female: "en-GB-MaisieNeural", // child, British
-    male: "en-GB-RyanNeural", // warm British male
+    male: { voice: "en-GB-ThomasNeural" }, // warm adult man
+    female: { voice: "en-GB-SoniaNeural" }, // warm adult woman
+    boy: { voice: "en-GB-RyanNeural", pitch: "+40Hz", rate: "+5%" },
+    girl: { voice: "en-GB-MaisieNeural" }, // real child voice
   },
   au: {
-    female: "en-AU-NatashaNeural", // warm female, Australian
-    male: "en-AU-WilliamNeural", // relaxed Aussie male
+    male: { voice: "en-AU-WilliamNeural" },
+    female: { voice: "en-AU-NatashaNeural" },
+    boy: { voice: "en-AU-WilliamNeural", pitch: "+40Hz", rate: "+5%" },
+    girl: { voice: "en-AU-NatashaNeural", pitch: "+30Hz", rate: "+5%" },
   },
   in: {
-    female: "en-IN-NeerjaNeural", // warm female, Indian
-    male: "en-IN-PrabhatNeural", // warm Indian male
+    male: { voice: "en-IN-PrabhatNeural" },
+    female: { voice: "en-IN-NeerjaNeural" },
+    boy: { voice: "en-IN-PrabhatNeural", pitch: "+40Hz", rate: "+5%" },
+    girl: { voice: "en-IN-NeerjaNeural", pitch: "+30Hz", rate: "+5%" },
   },
 };
 
-/** Default voice (US female) used when ids are missing or unknown. */
-export const DEFAULT_VOICE = VOICE_MAP.us.female;
+/** Default voice (US girl) used when ids are missing or unknown. */
+export const DEFAULT_VOICE_SPEC: VoiceSpec = VOICE_MAP.us.girl;
 
 function isAccentId(value: unknown): value is AccentId {
   return value === "us" || value === "uk" || value === "au" || value === "in";
 }
 
-function isGenderId(value: unknown): value is GenderId {
-  return value === "female" || value === "male";
+function isVoiceType(value: unknown): value is VoiceTypeId {
+  return (
+    value === "male" || value === "female" || value === "boy" || value === "girl"
+  );
 }
 
-/** Resolve client-supplied accent/gender ids to an Edge voice. */
+/** Resolve client-supplied accent/voice-type ids to an Edge voice spec. */
 export function getVoiceForAccent(
   accent?: string | null,
-  gender?: string | null
-): string {
+  voiceType?: string | null
+): VoiceSpec {
   if (isAccentId(accent)) {
-    return VOICE_MAP[accent][isGenderId(gender) ? gender : "female"];
+    return VOICE_MAP[accent][isVoiceType(voiceType) ? voiceType : "girl"];
   }
-  return DEFAULT_VOICE;
+  return DEFAULT_VOICE_SPEC;
 }
 
 /** Escape text for safe insertion into an SSML document. */
@@ -74,8 +92,9 @@ function escapeXml(text: string): string {
 /**
  * Synthesize speech with Edge TTS.
  *
- * Accepts accent/gender ids (resolved through VOICE_MAP) or an explicit voice
- * name. Unknown values fall back to the default US female voice.
+ * Accepts accent/voice-type ids (resolved through VOICE_MAP, including the
+ * kid-voice prosody pitch/rate adjustments). Unknown values fall back to
+ * the default US girl voice.
  *
  * @returns MP3 audio buffer, or `null` when synthesis fails. Failures are
  *          logged but never thrown so the conversation can continue with a
@@ -85,22 +104,29 @@ function escapeXml(text: string): string {
 export async function synthesizeSpeechEdge(
   text: string,
   accent?: string | null,
-  gender?: string | null
+  voiceType?: string | null
 ): Promise<Buffer | null> {
   const trimmed = text?.trim();
   if (!trimmed) return null;
 
-  const voice = getVoiceForAccent(accent, gender);
+  const spec = getVoiceForAccent(accent, voiceType);
 
   let tts: MsEdgeTTS | null = null;
   try {
     tts = new MsEdgeTTS();
     await tts.setMetadata(
-      voice,
+      spec.voice,
       OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3
     );
 
-    const { audioStream } = tts.toStream(escapeXml(trimmed));
+    const prosody = {
+      ...(spec.pitch ? { pitch: spec.pitch } : {}),
+      ...(spec.rate ? { rate: spec.rate } : {}),
+    };
+    const { audioStream } = tts.toStream(
+      escapeXml(trimmed),
+      Object.keys(prosody).length > 0 ? prosody : undefined
+    );
 
     const buffer = await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];

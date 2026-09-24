@@ -132,7 +132,7 @@ function saveLessonMessages(messages: ChatMessage[]): void {
 
 export default function LessonMode({ onExit }: { onExit: () => void }) {
   const router = useRouter();
-  const { accent, gender } = useAccent();
+  const { accent, voice } = useAccent();
 
   const [progress, setProgress] = useState<LessonProgress>(() => {
     const loaded = loadLessonProgress();
@@ -363,7 +363,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     formData.append("stepIndex", String(stepIndexRef.current));
     formData.append("progress", JSON.stringify(progress));
     formData.append("accent", accent);
-    formData.append("gender", gender);
+    formData.append("voice", voice);
 
     try {
       const res = await fetch("/api/conversation", {
@@ -448,7 +448,7 @@ export default function LessonMode({ onExit }: { onExit: () => void }) {
     } finally {
       setStatus("idle");
     }
-  }, [addMessage, progress, accent, gender]);
+  }, [addMessage, progress, accent, voice]);
 
   const startRecording = useCallback(async () => {
     if (status !== "idle") return;

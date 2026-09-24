@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ACCENTS,
-  GENDERS,
+  VOICE_TYPES,
   getAccentPreference,
   setAccentPreference,
   useAccent,
   type AccentId,
-  type GenderId,
+  type VoiceTypeId,
 } from "@/lib/accentStore";
 import { playClip, stopPlayback, usePlayingMessageId } from "@/lib/audioPlayer";
 
@@ -18,13 +18,13 @@ const PREVIEW_TEXT = "Hi! I'm your English teacher. Let's practice together!";
 /** Fetch + play the sample phrase in a specific voice. */
 async function previewVoice(
   accent: AccentId,
-  gender: GenderId
+  voice: VoiceTypeId
 ): Promise<void> {
   try {
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: PREVIEW_TEXT, accent, gender }),
+      body: JSON.stringify({ text: PREVIEW_TEXT, accent, voice }),
     });
     const data: { audioBase64?: string; error?: string } = await res.json();
     if (!res.ok || !data.audioBase64) {
@@ -37,15 +37,15 @@ async function previewVoice(
 }
 
 /**
- * Flag grid + gender toggle + preview button. Shared by the full settings
- * card and the compact header dropdown.
+ * Flag grid + voice-type selector + preview button. Shared by the full
+ * settings card and the compact header dropdown.
  */
 function VoiceControls({
   autoPreview,
 }: {
   autoPreview: boolean;
 }) {
-  const { accent, gender } = useAccent();
+  const { accent, voice } = useAccent();
   const playingId = usePlayingMessageId();
   const [busy, setBusy] = useState(false);
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -56,20 +56,20 @@ function VoiceControls({
     };
   }, []);
 
-  const playPreview = useCallback((a: AccentId, g: GenderId) => {
+  const playPreview = useCallback((a: AccentId, v: VoiceTypeId) => {
     setBusy(true);
-    void previewVoice(a, g).finally(() => setBusy(false));
+    void previewVoice(a, v).finally(() => setBusy(false));
   }, []);
 
-  // Tapping a flag/gender auto-plays a short sample in the new voice. A
-  // short debounce collapses rapid flag+gender taps into a single preview.
+  // Tapping a flag/voice type auto-plays a short sample in the new voice. A
+  // short debounce collapses rapid taps into a single preview.
   const schedulePreview = useCallback(
-    (a: AccentId, g: GenderId) => {
+    (a: AccentId, v: VoiceTypeId) => {
       if (!autoPreview) return;
       if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
       previewTimerRef.current = setTimeout(() => {
         stopPlayback();
-        playPreview(a, g);
+        playPreview(a, v);
       }, 300);
     },
     [autoPreview, playPreview]
@@ -77,11 +77,11 @@ function VoiceControls({
 
   const selectAccent = (id: AccentId) => {
     setAccentPreference({ accent: id });
-    schedulePreview(id, getAccentPreference().gender);
+    schedulePreview(id, getAccentPreference().voice);
   };
 
-  const selectGender = (id: GenderId) => {
-    setAccentPreference({ gender: id });
+  const selectVoice = (id: VoiceTypeId) => {
+    setAccentPreference({ voice: id });
     schedulePreview(getAccentPreference().accent, id);
   };
 
@@ -124,28 +124,34 @@ function VoiceControls({
         })}
       </div>
 
-      {/* Female / Male */}
+      {/* Man / Woman / Boy / Girl */}
       <div
         role="group"
-        aria-label="Choose teacher gender"
-        className="flex gap-1 rounded-full bg-gray-100 p-1"
+        aria-label="Choose teacher voice type"
+        className="grid grid-cols-4 gap-1.5"
       >
-        {GENDERS.map((g) => {
-          const selected = g.id === gender;
+        {VOICE_TYPES.map((v) => {
+          const selected = v.id === voice;
           return (
             <button
-              key={g.id}
+              key={v.id}
               type="button"
               aria-pressed={selected}
-              onClick={() => selectGender(g.id)}
-              className={`flex flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-xs font-bold transition-colors ${
+              onClick={() => selectVoice(v.id)}
+              className={`flex flex-col items-center gap-0.5 rounded-xl px-1 py-1.5 transition-colors ${
                 selected
-                  ? "bg-white text-blue-600 shadow-sm"
-                  : "text-gray-500 hover:text-gray-700"
+                  ? "bg-blue-50 ring-1 ring-blue-200"
+                  : "hover:bg-gray-50"
               }`}
             >
-              <span>{g.emoji}</span>
-              {g.label}
+              <span className="text-lg leading-none">{v.emoji}</span>
+              <span
+                className={`text-[10px] font-bold leading-tight ${
+                  selected ? "text-blue-600" : "text-gray-500"
+                }`}
+              >
+                {v.label}
+              </span>
             </button>
           );
         })}
@@ -156,7 +162,7 @@ function VoiceControls({
         type="button"
         onClick={() => {
           stopPlayback();
-          playPreview(accent, gender);
+          playPreview(accent, voice);
         }}
         className="flex w-full items-center justify-center gap-1.5 rounded-full bg-blue-500 px-3 py-2 text-xs font-bold text-white shadow-sm transition-colors hover:bg-blue-600"
       >
@@ -168,15 +174,15 @@ function VoiceControls({
 
 /**
  * Teacher voice picker.
- * - compact (headers): flag + gender glyph pill opening a dropdown.
- * - full (Me settings): card with flag grid, gender toggle and preview.
+ * - compact (headers): flag + voice-type glyph pill opening a dropdown.
+ * - full (Me settings): card with flag grid, 4 voice types and preview.
  */
 export default function AccentPicker({
   compact = false,
 }: {
   compact?: boolean;
 }) {
-  const { accent, gender } = useAccent();
+  const { accent, voice } = useAccent();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -192,7 +198,8 @@ export default function AccentPicker({
   }, [open]);
 
   const activeAccent = ACCENTS.find((a) => a.id === accent) ?? ACCENTS[0];
-  const activeGender = GENDERS.find((g) => g.id === gender) ?? GENDERS[0];
+  const activeVoice =
+    VOICE_TYPES.find((v) => v.id === voice) ?? VOICE_TYPES[3];
 
   if (!compact) {
     return (
@@ -214,15 +221,15 @@ export default function AccentPicker({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Teacher voice: ${activeAccent.label} ${activeGender.label}. Click to change.`}
+        aria-label={`Teacher voice: ${activeAccent.label} ${activeVoice.label}. Click to change.`}
         className="flex h-9 items-center gap-1 rounded-full bg-white px-3 text-sm font-semibold text-gray-600 shadow-sm transition-colors hover:bg-gray-50"
       >
         <span className="text-base leading-none">{activeAccent.emoji}</span>
         <span
-          className="text-[11px] leading-none text-blue-500"
+          className="text-[13px] leading-none"
           aria-hidden
         >
-          {activeGender.glyph}
+          {activeVoice.glyph}
         </span>
         <span className="text-[10px] text-gray-400">▾</span>
       </button>

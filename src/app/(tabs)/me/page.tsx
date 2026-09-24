@@ -191,7 +191,7 @@ export default function MePage() {
         </div>
       </section>
 
-      {/* ── Teacher voice: accent + gender + preview ─────────────────── */}
+      {/* ── Teacher voice: accent + voice type + preview ────────────── */}
       <AccentPicker />
 
       {/* ── This week mini-chart ─────────────────────────────────────── */}

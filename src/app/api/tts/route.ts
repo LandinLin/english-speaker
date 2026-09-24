@@ -16,13 +16,13 @@ export async function POST(request: Request) {
     const body: unknown = await request.json();
     const bodyObj =
       body && typeof body === "object"
-        ? (body as { text?: unknown; accent?: unknown; gender?: unknown })
+        ? (body as { text?: unknown; accent?: unknown; voice?: unknown })
         : null;
     const text = bodyObj ? String(bodyObj.text ?? "").trim() : "";
     const accent =
       typeof bodyObj?.accent === "string" ? bodyObj.accent : null;
-    const gender =
-      typeof bodyObj?.gender === "string" ? bodyObj.gender : null;
+    const voiceType =
+      typeof bodyObj?.voice === "string" ? bodyObj.voice : null;
 
     if (!text) {
       return Response.json({ error: "Missing text" }, { status: 400 });
@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     const audioBuffer = await synthesizeSpeechEdge(
       text.slice(0, MAX_TEXT_LENGTH),
       accent,
-      gender
+      voiceType
     );
     if (!audioBuffer) {
       return Response.json(

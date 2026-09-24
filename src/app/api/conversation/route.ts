@@ -39,8 +39,8 @@ export async function POST(request: Request) {
     const mode = (formData.get("mode") as string) || "chat";
     const accentRaw = formData.get("accent");
     const accent = typeof accentRaw === "string" ? accentRaw : null;
-    const genderRaw = formData.get("gender");
-    const gender = typeof genderRaw === "string" ? genderRaw : null;
+    const voiceRaw = formData.get("voice");
+    const voiceType = typeof voiceRaw === "string" ? voiceRaw : null;
     const stepIndexRaw = formData.get("stepIndex") as string;
     const stepIndex = stepIndexRaw ? parseInt(stepIndexRaw, 10) : 0;
     const progressRaw = formData.get("progress") as string;
@@ -111,7 +111,7 @@ export async function POST(request: Request) {
     const audioBuffer = await synthesizeSpeechEdge(
       feedback.reply,
       accent,
-      gender
+      voiceType
     );
     const audioBase64 = audioBuffer ? audioBuffer.toString("base64") : null;
     console.log(
