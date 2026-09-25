@@ -51,7 +51,7 @@ export function sessionCookieOptions() {
 /** Create a session row and set the auth cookie (call from a route handler). */
 export async function startSession(userId: string): Promise<string> {
   const token = generateSessionToken();
-  createAuthSession(userId, token);
+  await createAuthSession(userId, token);
   const jar = await cookies();
   jar.set(SESSION_COOKIE, token, sessionCookieOptions());
   return token;
@@ -59,7 +59,7 @@ export async function startSession(userId: string): Promise<string> {
 
 /** Clear the session row and cookie on logout. */
 export async function endSession(token: string | undefined): Promise<void> {
-  if (token) deleteAuthSession(token);
+  if (token) await deleteAuthSession(token);
   const jar = await cookies();
   jar.set(SESSION_COOKIE, "", { ...sessionCookieOptions(), maxAge: 0 });
 }
@@ -76,9 +76,9 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 }
 
 /** Variant usable from proxy.ts (Next 16, Node runtime) with a raw cookie string. */
-export function getUserFromCookieHeader(
+export async function getUserFromCookieHeader(
   cookieHeader: string | null
-): SessionUser | null {
+): Promise<SessionUser | null> {
   if (!cookieHeader) return null;
   const match = cookieHeader
     .split(";")

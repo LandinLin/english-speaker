@@ -56,6 +56,22 @@ const RECORDER_CODECS = [
   "audio/ogg;codecs=opus",
 ] as const;
 
+/**
+ * MediaRecorder emits data in slices this small. All slices of ONE
+ * continuous recorder session concatenate into a single valid container
+ * (the first slice carries the header), which lets us keep recording while
+ * an in-flight request is replaced by a longer, complete turn.
+ */
+const RECORDER_TIMESLICE_MS = 250;
+
+/**
+ * Extra wait after the VAD's trailing-silence endpoint before submitting.
+ * The VAD closes after 700ms quiet; a child thinking between sentences
+ * often pauses longer. If speech resumes within this grace window the turn
+ * stays one continuous clip and no request is wasted.
+ */
+const ENDPOINT_GRACE_MS = 500;
+
 function pickRecorderMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   for (const candidate of RECORDER_CODECS) {
@@ -103,10 +119,12 @@ export default function AudioCall() {
   const vadRef = useRef<VoiceActivityDetector | null>(null);
   const aiAudioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // submitSegment is declared after beginRecording; a ref breaks the cycle.
-  const submitSegmentRef = useRef<
-    ((session: number) => Promise<void>) | null
-  >(null);
+  // Pending "pause ended — about to submit" grace timer.
+  const endpointTimerRef = useRef<number | null>(null);
+  // submitTurn is declared after startTurnRecording; a ref breaks the cycle.
+  const submitTurnRef = useRef<((session: number) => Promise<void>) | null>(
+    null
+  );
   const connectedAtRef = useRef<number | null>(null);
   const captionIdRef = useRef(0);
   // Persisted session row (type "call") for the currently active call.
@@ -137,13 +155,21 @@ export default function AudioCall() {
     VoiceActivityDetector.cancelPrime();
     abortRef.current?.abort();
     abortRef.current = null;
+    if (endpointTimerRef.current !== null) {
+      window.clearTimeout(endpointTimerRef.current);
+      endpointTimerRef.current = null;
+    }
     const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.onstop = null; // discard: no submit from a torn-down recorder
-      try {
-        recorder.stop();
-      } catch {
-        // already stopping
+    if (recorder) {
+      // Discard: no submit from a torn-down recorder, no late chunk pushes.
+      recorder.onstop = null;
+      recorder.ondataavailable = null;
+      if (recorder.state !== "inactive") {
+        try {
+          recorder.stop();
+        } catch {
+          // already stopping
+        }
       }
     }
     recorderRef.current = null;
@@ -230,10 +256,49 @@ export default function AudioCall() {
 
   // ── Recording + submission ──────────────────────────────────────────
 
-  const beginRecording = useCallback(
+  // Cancel a pending endpoint submission (speech resumed during grace).
+  const clearEndpointTimer = useCallback(() => {
+    if (endpointTimerRef.current !== null) {
+      window.clearTimeout(endpointTimerRef.current);
+      endpointTimerRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Retire the current turn's recorder WITHOUT submitting. Used when the
+   * audio has already been snapshotted (reply on its way), on mute/cancel,
+   * barge-in, and teardown.
+   */
+  const stopTurnRecorder = useCallback(() => {
+    clearEndpointTimer();
+    const recorder = recorderRef.current;
+    if (recorder) {
+      recorder.onstop = null;
+      recorder.ondataavailable = null;
+      if (recorder.state !== "inactive") {
+        try {
+          recorder.stop();
+        } catch {
+          // already stopping
+        }
+      }
+    }
+    recorderRef.current = null;
+    chunksRef.current = [];
+  }, [clearEndpointTimer]);
+
+  const startTurnRecording = useCallback(
     (session: number) => {
+      if (sessionRef.current !== session) return;
+      const existing = recorderRef.current;
+      if (existing && existing.state === "recording") {
+        // Same turn is already being captured (speech resumed while a
+        // request was in flight, or inside the grace window) — keep it.
+        if (phaseRef.current !== "recording") setPhaseBoth("recording");
+        return;
+      }
       const stream = streamRef.current;
-      if (!stream || sessionRef.current !== session) return;
+      if (!stream) return;
       try {
         chunksRef.current = [];
         const mimeType = pickRecorderMimeType();
@@ -244,16 +309,10 @@ export default function AudioCall() {
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunksRef.current.push(e.data);
         };
-        recorder.onstop = () => {
-          // Stale session (End pressed, or a newer call started): discard.
-          if (sessionRef.current !== session) {
-            chunksRef.current = [];
-            recorderRef.current = null;
-            return;
-          }
-          void submitSegmentRef.current?.(session);
-        };
-        recorder.start();
+        // Timesliced delivery: the recorder STAYS RUNNING across
+        // between-sentence pauses and even across an aborted in-flight
+        // request, so a multi-sentence turn is always one complete clip.
+        recorder.start(RECORDER_TIMESLICE_MS);
         recorderRef.current = recorder;
         setPhaseBoth("recording");
       } catch (err) {
@@ -263,21 +322,27 @@ export default function AudioCall() {
     [setPhaseBoth]
   );
 
-  const submitSegment = useCallback(
+  const submitTurn = useCallback(
     async (session: number) => {
-      const chunks = chunksRef.current;
-      chunksRef.current = [];
-      recorderRef.current = null;
+      endpointTimerRef.current = null;
+      if (sessionRef.current !== session) return;
 
-      if (chunks.length === 0 || sessionRef.current !== session) {
-        if (sessionRef.current === session) setPhaseBoth("listening");
+      // Immutable snapshot of the turn so far. The recorder is NOT stopped:
+      // if the child says another sentence while this request is in flight
+      // the fetch is aborted and the SAME recorder's full audio is resent.
+      const chunks = chunksRef.current.slice();
+
+      if (chunks.length === 0) {
+        stopTurnRecorder();
+        setPhaseBoth("listening");
         return;
       }
 
       const mimeType = chunks[0]?.type || "audio/webm";
       const blob = new Blob(chunks, { type: mimeType });
       if (blob.size === 0) {
-        if (sessionRef.current === session) setPhaseBoth("listening");
+        stopTurnRecorder();
+        setPhaseBoth("listening");
         return;
       }
 
@@ -314,6 +379,11 @@ export default function AudioCall() {
 
         const transcript = data.transcript ?? "";
         const aiText = data.aiText ?? "";
+
+        // The complete turn audio was sent in the snapshot; retire the
+        // recorder before the reply so a barge-in starts a fresh new turn.
+        stopTurnRecorder();
+
         historyRef.current = [
           ...historyRef.current,
           { role: "user" as const, content: transcript },
@@ -373,25 +443,30 @@ export default function AudioCall() {
           vadRef.current?.beginCooldown(VAD_CONFIG.cooldownMs);
         }
       } catch (err) {
-        if (controller.signal.aborted || sessionRef.current !== session) return;
+        if (sessionRef.current !== session) return;
+        // Turn extension: the child kept talking and the VAD cancelled this
+        // request to resubmit the full clip. The recorder stays alive;
+        // leave the phase as "recording" (set by the speech-start handler).
+        if (controller.signal.aborted) return;
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("📞 [call] Conversation failed:", err);
         appendNotice(
           "Oops! I didn't catch that. Let's try again!",
           callSessionIdRef.current ?? undefined
         );
+        // Keep the recorder: if the child repeats, the whole turn is resent.
         setPhaseBoth("listening");
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [accent, voice, setPhaseBoth]
+    [accent, voice, setPhaseBoth, stopTurnRecorder]
   );
   useEffect(() => {
-    submitSegmentRef.current = submitSegment;
-  }, [submitSegment]);
+    submitTurnRef.current = submitTurn;
+  }, [submitTurn]);
 
-  // ── Barge-in: user talks over Buddy (or while we're waiting) ────────
+  // ── Barge-in: user talks over Buddy's REPLY (a genuinely new turn) ──
 
   const bargeIn = useCallback(
     (session: number) => {
@@ -406,13 +481,15 @@ export default function AudioCall() {
         audioEl.src = "";
         aiAudioRef.current = null;
       }
-      // 2) Abort an in-flight reply fetch (processing phase).
+      // 2) Cancel any just-returning reply playback setup.
       abortRef.current?.abort();
       abortRef.current = null;
-      // 3) Start capturing the new utterance right away.
-      beginRecording(session);
+      // 3) The previous turn is complete — retire its recorder, then start
+      // capturing the new utterance as a fresh turn.
+      stopTurnRecorder();
+      startTurnRecording(session);
     },
-    [beginRecording]
+    [startTurnRecording, stopTurnRecorder]
   );
 
   // ── VAD callbacks (created per session inside startCall) ────────────
@@ -480,39 +557,44 @@ export default function AudioCall() {
         if (sessionRef.current !== session || mutedRef.current) return;
         const p = phaseRef.current;
         if (p === "listening") {
-          beginRecording(session);
-        } else if (p === "speaking" || p === "processing") {
+          startTurnRecording(session);
+        } else if (p === "recording") {
+          // Resumed inside the endpoint grace window — keep one turn.
+          clearEndpointTimer();
+        } else if (p === "processing") {
+          // Same turn continues after a between-sentence pause: cancel the
+          // in-flight PARTIAL submission but keep recording, so the whole
+          // multi-sentence clip is transcribed together on the next pause.
+          abortRef.current?.abort();
+          abortRef.current = null;
+          startTurnRecording(session); // live recorder is kept
+        } else if (p === "speaking") {
           bargeIn(session);
         }
       },
       onSpeechEnd: (reason) => {
         if (sessionRef.current !== session || mutedRef.current) return;
         if (phaseRef.current !== "recording") return;
-        const recorder = recorderRef.current;
         if (reason === "cancel") {
           // Sub-minimum click/pop: discard the recording, stay in call.
-          if (recorder && recorder.state !== "inactive") {
-            recorder.onstop = null;
-            try {
-              recorder.stop();
-            } catch {
-              // ignore
-            }
-          }
-          recorderRef.current = null;
-          chunksRef.current = [];
+          stopTurnRecorder();
           setPhaseBoth("listening");
           return;
         }
-        if (recorder && recorder.state !== "inactive") {
-          try {
-            recorder.stop(); // → onstop → submitSegment
-          } catch {
-            chunksRef.current = [];
-            recorderRef.current = null;
-            setPhaseBoth("listening");
-          }
+        if (!recorderRef.current) {
+          setPhaseBoth("listening");
+          return;
         }
+        // Wait out the grace window before submitting: another sentence
+        // starting within it extends this turn instead of being chopped
+        // into a separate (previously discarded) segment. The recorder
+        // stays running and keeps capturing.
+        clearEndpointTimer();
+        endpointTimerRef.current = window.setTimeout(() => {
+          endpointTimerRef.current = null;
+          if (sessionRef.current !== session) return;
+          void submitTurnRef.current?.(session);
+        }, ENDPOINT_GRACE_MS);
       },
     });
     try {
@@ -540,7 +622,14 @@ export default function AudioCall() {
       })
     );
     setPhaseBoth("listening");
-  }, [beginRecording, bargeIn, releaseResources, setPhaseBoth]);
+  }, [
+    startTurnRecording,
+    bargeIn,
+    stopTurnRecorder,
+    clearEndpointTimer,
+    releaseResources,
+    setPhaseBoth,
+  ]);
 
   // ── Controls ────────────────────────────────────────────────────────
 
@@ -569,24 +658,14 @@ export default function AudioCall() {
     if (next) {
       vad?.setEnabled(false);
       // Discard anything recorded so far — do NOT submit.
-      const recorder = recorderRef.current;
-      if (recorder && recorder.state !== "inactive") {
-        recorder.onstop = null;
-        try {
-          recorder.stop();
-        } catch {
-          // ignore
-        }
-      }
-      recorderRef.current = null;
-      chunksRef.current = [];
+      stopTurnRecorder();
       if (phaseRef.current === "recording") setPhaseBoth("listening");
     } else {
       vad?.setEnabled(true);
       // Ignore the sound of tapping unmute.
       vad?.beginCooldown(150);
     }
-  }, [setPhaseBoth]);
+  }, [setPhaseBoth, stopTurnRecorder]);
 
   // Keyboard: Esc ends, M mutes (only while in a call).
   useEffect(() => {

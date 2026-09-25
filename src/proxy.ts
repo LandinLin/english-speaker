@@ -14,7 +14,7 @@ const PROTECTED_PAGES = new Set([
   "/dashboard",
 ]);
 
-export function proxy(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const isAuthPage = AUTH_PAGES.has(pathname);
 
@@ -25,10 +25,10 @@ export function proxy(request: NextRequest) {
 
   const token = request.cookies.get(SESSION_COOKIE)?.value;
 
-  // Full validation: local SQLite primary-key lookup, sub-millisecond.
+  // Full validation: Postgres indexed primary-key lookup.
   let validUser = false;
   try {
-    validUser = token ? getSessionUser(token) !== null : false;
+    validUser = token ? (await getSessionUser(token)) !== null : false;
   } catch (error) {
     // Never hard-fail a page on a lookup error — fall back to cookie presence;
     // the client AuthGate and the API handlers enforce the real session.

@@ -6,11 +6,13 @@
  *  - non-GET requests  -> never intercepted
  */
 
-const CACHE_VERSION = "english-buddy-v1";
+const CACHE_VERSION = "english-buddy-v2";
 const PRECACHE_URLS = [
   "/",
   "/history",
   "/dashboard",
+  "/call",
+  "/me",
   "/manifest.json",
   "/icon-192.png",
   "/icon-512.png",

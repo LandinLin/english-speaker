@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
+import { Pool, type QueryConfig, type QueryResultRow } from "pg";
 
 export interface StoredMessage {
   id: string;
@@ -63,7 +61,7 @@ interface SessionMetaRow {
   total_steps: number | null;
   stars_earned: number | null;
   corrections_count: number | null;
-  timed_out: number | null;
+  timed_out: boolean | null;
   accent: string | null;
   title: string | null;
   started_at: number | null;
@@ -85,222 +83,6 @@ interface MessageRow {
   user_id: string | null;
 }
 
-let db: Database.Database | null = null;
-
-function getDb(): Database.Database {
-  if (db) return db;
-
-  const dataDir = path.join(process.cwd(), "data");
-  fs.mkdirSync(dataDir, { recursive: true });
-  const dbPath = path.join(dataDir, "english-buddy.db");
-  db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 3000");
-  migrate(db, dbPath);
-  return db;
-}
-
-// ---------------------------------------------------------------------------
-// Migration. Each step upgrades PRAGMA user_version by one, backs up the
-// database file first (when data exists), and runs its DDL inside a single
-// transaction with rollback on failure.
-//   v1 → v2: users + auth_sessions + messages.user_id
-//   v2 → v3: session_meta (chat/lesson typing + lesson results)
-//   v3 → v4: session_meta.accent (teacher voice used in the session)
-//   v4 → v5: session_meta call lifecycle columns (title/startedAt/endedAt/durationMs)
-// ---------------------------------------------------------------------------
-function migrate(database: Database.Database, dbPath: string): void {
-  let userVersion = database.pragma("user_version", { simple: true }) as number;
-  if (userVersion >= 5) return;
-
-  const backup = (targetVersion: number) => {
-    if (!fs.existsSync(dbPath)) return;
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = path.join(
-      path.dirname(dbPath),
-      `english-buddy.backup-v${targetVersion}-${stamp}.db`
-    );
-    database.backup(backupPath);
-    console.log(`🗄️ [db] Pre-v${targetVersion} backup created: ${backupPath}`);
-  };
-
-  // ── v1 → v2 ──────────────────────────────────────────────────────────
-  if (userVersion < 2) {
-    backup(2);
-    const hasUserIdColumn = (
-      database.prepare("PRAGMA table_info(messages)").all() as { name: string }[]
-    ).some((col) => col.name === "user_id");
-
-    const v2 = database.transaction(() => {
-      database.exec(`
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          username TEXT NOT NULL UNIQUE,
-          display_name TEXT NOT NULL,
-          password_hash TEXT NOT NULL,
-          created_at INTEGER NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-          token TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          expires_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
-        CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
-      `);
-      if (!hasUserIdColumn) {
-        database.exec(`
-          ALTER TABLE messages ADD COLUMN user_id TEXT;
-          CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
-        `);
-      }
-      database.pragma("user_version = 2");
-    });
-
-    try {
-      v2();
-      userVersion = 2;
-      console.log("✅ [db] Migration to v2 complete (users + sessions + user_id)");
-    } catch (err) {
-      console.error("❌ [db] v2 migration failed (rolled back):", err);
-      throw err;
-    }
-  }
-
-  // ── v2 → v3 ──────────────────────────────────────────────────────────
-  if (userVersion < 3) {
-    backup(3);
-    const v3 = database.transaction(() => {
-      database.exec(`
-        CREATE TABLE IF NOT EXISTS session_meta (
-          id TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          type TEXT NOT NULL DEFAULT 'chat',
-          lesson_id TEXT,
-          lesson_title TEXT,
-          duration_minutes INTEGER,
-          completed_steps INTEGER,
-          total_steps INTEGER,
-          stars_earned INTEGER,
-          corrections_count INTEGER,
-          timed_out INTEGER NOT NULL DEFAULT 0,
-          updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_session_meta_user ON session_meta(user_id);
-      `);
-      database.pragma("user_version = 3");
-    });
-
-    try {
-      v3();
-      console.log("✅ [db] Migration to v3 complete (session_meta)");
-    } catch (err) {
-      console.error("❌ [db] v3 migration failed (rolled back):", err);
-      throw err;
-    }
-  }
-
-  // ── v3 → v4 ──────────────────────────────────────────────────────────
-  if (userVersion < 4) {
-    backup(4);
-    const v4 = database.transaction(() => {
-      const hasAccentColumn = (
-        database.prepare("PRAGMA table_info(session_meta)").all() as { name: string }[]
-      ).some((col) => col.name === "accent");
-      if (!hasAccentColumn) {
-        database.exec(
-          "ALTER TABLE session_meta ADD COLUMN accent TEXT"
-        );
-      }
-      database.pragma("user_version = 4");
-    });
-
-    try {
-      v4();
-      console.log("✅ [db] Migration to v4 complete (session_meta.accent)");
-    } catch (err) {
-      console.error("❌ [db] v4 migration failed (rolled back):", err);
-      throw err;
-    }
-  }
-
-  // ── v4 → v5 ──────────────────────────────────────────────────────────
-  if (userVersion < 5) {
-    backup(5);
-    const v5 = database.transaction(() => {
-      const columns = database.prepare("PRAGMA table_info(session_meta)").all() as {
-        name: string;
-      }[];
-      const addColumn = (name: string, ddl: string) => {
-        if (!columns.some((col) => col.name === name)) {
-          database.exec(`ALTER TABLE session_meta ADD COLUMN ${ddl}`);
-        }
-      };
-      addColumn("title", "title TEXT");
-      addColumn("started_at", "started_at INTEGER");
-      addColumn("ended_at", "ended_at INTEGER");
-      addColumn("duration_ms", "duration_ms INTEGER");
-      database.pragma("user_version = 5");
-    });
-
-    try {
-      v5();
-      console.log(
-        "✅ [db] Migration to v5 complete (session_meta call lifecycle)"
-      );
-    } catch (err) {
-      console.error("❌ [db] v5 migration failed (rolled back):", err);
-      throw err;
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Users
-// ---------------------------------------------------------------------------
-
-export function createUser(input: {
-  id: string;
-  username: string;
-  displayName: string;
-  passwordHash: string;
-}): StoredUser {
-  getDb()
-    .prepare(
-      `INSERT INTO users (id, username, display_name, password_hash, created_at)
-       VALUES (@id, @username, @displayName, @passwordHash, @createdAt)`
-    )
-    .run({
-      id: input.id,
-      username: input.username,
-      displayName: input.displayName,
-      passwordHash: input.passwordHash,
-      createdAt: Date.now(),
-    });
-  return getUserById(input.id)!;
-}
-
-export function getUserById(id: string): StoredUser | null {
-  const row = getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as
-    | StoredUserRow
-    | undefined;
-  return row ? rowToUser(row) : null;
-}
-
-export function getUserByUsername(username: string): StoredUser | null {
-  const row = getDb()
-    .prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE")
-    .get(username) as StoredUserRow | undefined;
-  return row ? rowToUser(row) : null;
-}
-
-export function countUsers(): number {
-  const row = getDb().prepare("SELECT COUNT(*) AS n FROM users").get() as {
-    n: number;
-  };
-  return row.n;
-}
-
 interface StoredUserRow {
   id: string;
   username: string;
@@ -309,13 +91,184 @@ interface StoredUserRow {
   created_at: number;
 }
 
+// ---------------------------------------------------------------------------
+// Connection pool. Survives Next.js dev hot-reloads via globalThis.
+// ---------------------------------------------------------------------------
+
+const SCHEMA_VERSION = 1;
+const connectionString =
+  process.env.DATABASE_URL ??
+  "postgresql://127.0.0.1:5432/english_buddy";
+
+type PoolGlobal = { __pgPool?: Pool; __pgInit?: Promise<void> };
+const globalForPool = globalThis as unknown as PoolGlobal;
+
+function createPool(): Pool {
+  const isLocal = /@(?:localhost|127\.0\.0\.1)(?::|\/)/.test(connectionString);
+  const pool = new Pool({
+    connectionString,
+    // Managed Postgres (Neon/Supabase/...) requires TLS; local sockets do not.
+    ssl: isLocal ? undefined : { rejectUnauthorized: false },
+  });
+  pool.on("error", (err) => {
+    console.error("🗄️ [db] Unexpected idle Postgres client error:", err);
+  });
+  return pool;
+}
+
+function getPool(): Pool {
+  if (!globalForPool.__pgPool) globalForPool.__pgPool = createPool();
+  return globalForPool.__pgPool;
+}
+
+// ---------------------------------------------------------------------------
+// Schema (idempotent). Bump SCHEMA_VERSION and add migration steps below when
+// the shape changes; app_meta records the version the cluster was built at.
+// ---------------------------------------------------------------------------
+
+const SCHEMA_DDL = `
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_key
+  ON users (lower(username));
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  created_at BIGINT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'ai')),
+  text TEXT NOT NULL,
+  praise TEXT,
+  correction TEXT,
+  new_word TEXT,
+  audio_base64 TEXT,
+  user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id);
+
+CREATE TABLE IF NOT EXISTS session_meta (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type TEXT NOT NULL DEFAULT 'chat' CHECK (type IN ('chat', 'lesson', 'call')),
+  lesson_id TEXT,
+  lesson_title TEXT,
+  duration_minutes INTEGER,
+  completed_steps INTEGER,
+  total_steps INTEGER,
+  stars_earned INTEGER,
+  corrections_count INTEGER,
+  timed_out BOOLEAN NOT NULL DEFAULT false,
+  accent TEXT,
+  title TEXT,
+  started_at BIGINT,
+  ended_at BIGINT,
+  duration_ms BIGINT,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_meta_user ON session_meta(user_id);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+INSERT INTO app_meta (key, value)
+VALUES ('schema_version', '${SCHEMA_VERSION}')
+ON CONFLICT (key) DO NOTHING;
+`;
+
+async function init(): Promise<void> {
+  if (!globalForPool.__pgInit) {
+    globalForPool.__pgInit = (async () => {
+      await getPool().query(SCHEMA_DDL);
+      console.log("🗄️ [db] Postgres schema ready");
+    })();
+  }
+  return globalForPool.__pgInit;
+}
+
+async function query<T extends QueryResultRow>(
+  text: QueryConfig | string,
+  params?: unknown[]
+): Promise<T[]> {
+  await init();
+  const result = await getPool().query(text, params);
+  return result.rows as T[];
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+export async function createUser(input: {
+  id: string;
+  username: string;
+  displayName: string;
+  passwordHash: string;
+}): Promise<StoredUser> {
+  await query(
+    `INSERT INTO users (id, username, display_name, password_hash, created_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      input.id,
+      input.username,
+      input.displayName,
+      input.passwordHash,
+      Date.now(),
+    ]
+  );
+  const user = await getUserById(input.id);
+  if (!user) throw new Error(`createUser: row ${input.id} missing after insert`);
+  return user;
+}
+
+export async function getUserById(id: string): Promise<StoredUser | null> {
+  const rows = await query<StoredUserRow>(
+    "SELECT * FROM users WHERE id = $1",
+    [id]
+  );
+  return rows[0] ? rowToUser(rows[0]) : null;
+}
+
+export async function getUserByUsername(
+  username: string
+): Promise<StoredUser | null> {
+  // Matches the old SQLite COLLATE NOCASE behaviour (usernames are ASCII per
+  // validation), backed by the lower(username) unique index.
+  const rows = await query<StoredUserRow>(
+    "SELECT * FROM users WHERE lower(username) = lower($1)",
+    [username]
+  );
+  return rows[0] ? rowToUser(rows[0]) : null;
+}
+
+export async function countUsers(): Promise<number> {
+  const rows = await query<{ count: number }>(
+    "SELECT COUNT(*)::int AS count FROM users"
+  );
+  return rows[0].count;
+}
+
 function rowToUser(row: StoredUserRow): StoredUser {
   return {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
     passwordHash: row.password_hash,
-    createdAt: row.created_at,
+    createdAt: Number(row.created_at),
   };
 }
 
@@ -325,37 +278,38 @@ function rowToUser(row: StoredUserRow): StoredUser {
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-export function createAuthSession(
+export async function createAuthSession(
   userId: string,
   token: string,
   now = Date.now()
-): void {
-  getDb()
-    .prepare(
-      "INSERT INTO auth_sessions (token, user_id, expires_at) VALUES (?, ?, ?)"
-    )
-    .run(token, userId, now + SESSION_TTL_MS);
+): Promise<void> {
+  await query(
+    "INSERT INTO auth_sessions (token, user_id, expires_at) VALUES ($1, $2, $3)",
+    [token, userId, now + SESSION_TTL_MS]
+  );
 }
 
 /** Returns the session's user when the token is valid and unexpired. */
-export function getSessionUser(token: string, now = Date.now()): SessionUser | null {
-  const row = getDb()
-    .prepare(
-      `SELECT u.id AS id, u.username AS username, u.display_name AS display_name
-       FROM auth_sessions s
-       JOIN users u ON u.id = s.user_id
-       WHERE s.token = ? AND s.expires_at > ?`
-    )
-    .get(token, now) as SessionUser | undefined;
-  return row ?? null;
+export async function getSessionUser(
+  token: string,
+  now = Date.now()
+): Promise<SessionUser | null> {
+  const rows = await query<SessionUser>(
+    `SELECT u.id AS id, u.username AS username, u.display_name AS display_name
+     FROM auth_sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token = $1 AND s.expires_at > $2`,
+    [token, now]
+  );
+  return rows[0] ?? null;
 }
 
-export function deleteAuthSession(token: string): void {
-  getDb().prepare("DELETE FROM auth_sessions WHERE token = ?").run(token);
+export async function deleteAuthSession(token: string): Promise<void> {
+  await query("DELETE FROM auth_sessions WHERE token = $1", [token]);
 }
 
-export function deleteExpiredSessions(now = Date.now()): void {
-  getDb().prepare("DELETE FROM auth_sessions WHERE expires_at <= ?").run(now);
+export async function deleteExpiredSessions(now = Date.now()): Promise<void> {
+  await query("DELETE FROM auth_sessions WHERE expires_at <= $1", [now]);
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +320,7 @@ function rowToMessage(row: MessageRow, withAudio: boolean): StoredMessage {
   return {
     id: row.id,
     sessionId: row.session_id,
-    createdAt: row.created_at,
+    createdAt: Number(row.created_at),
     role: row.role === "user" ? "user" : "ai",
     text: row.text,
     ...(row.praise !== null ? { praise: row.praise } : {}),
@@ -379,85 +333,102 @@ function rowToMessage(row: MessageRow, withAudio: boolean): StoredMessage {
 }
 
 /** All messages for a user, oldest first. Audio excluded to keep payloads light. */
-export function listMessages(userId: string): StoredMessage[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT id, session_id, created_at, role, text, praise, correction, new_word, audio_base64, user_id
-       FROM messages WHERE user_id = ? ORDER BY created_at ASC`
-    )
-    .all(userId) as MessageRow[];
+export async function listMessages(
+  userId: string
+): Promise<StoredMessage[]> {
+  const rows = await query<MessageRow>(
+    `SELECT id, session_id, created_at, role, text, praise, correction, new_word, audio_base64, user_id
+     FROM messages WHERE user_id = $1 ORDER BY created_at ASC`,
+    [userId]
+  );
   return rows.map((row) => rowToMessage(row, false));
 }
 
-function toBind(message: StoredMessage, userId: string) {
-  return {
-    id: message.id,
-    sessionId: message.sessionId,
-    createdAt: message.createdAt,
-    role: message.role,
-    text: message.text,
-    praise: message.praise ?? null,
-    correction: message.correction ?? null,
-    newWord: message.newWord ?? null,
-    audioBase64: message.audioBase64 ?? null,
-    userId,
-  };
-}
-
 /** Upsert messages for a user. Existing audio is kept when the incoming copy has none. */
-export function upsertMessages(
+export async function upsertMessages(
   userId: string,
   messages: StoredMessage[]
-): number {
-  const stmt = getDb().prepare(`
-    INSERT INTO messages (id, session_id, created_at, role, text, praise, correction, new_word, audio_base64, user_id)
-    VALUES (@id, @sessionId, @createdAt, @role, @text, @praise, @correction, @newWord, @audioBase64, @userId)
-    ON CONFLICT(id) DO UPDATE SET
-      session_id = excluded.session_id,
-      created_at = excluded.created_at,
-      role = excluded.role,
-      text = excluded.text,
-      praise = excluded.praise,
-      correction = excluded.correction,
-      new_word = excluded.new_word,
-      audio_base64 = COALESCE(excluded.audio_base64, messages.audio_base64),
-      user_id = COALESCE(excluded.user_id, messages.user_id)
-  `);
-  const run = getDb().transaction((msgs: StoredMessage[]) => {
-    for (const message of msgs) stmt.run(toBind(message, userId));
-  });
-  run(messages);
-  return messages.length;
+): Promise<number> {
+  if (messages.length === 0) return 0;
+  await init();
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    // One set-based INSERT via unnest keeps this a single round trip while
+    // preserving the ON CONFLICT audio-merge semantics of the old store.
+    await client.query(
+      `INSERT INTO messages (
+         id, session_id, created_at, role, text, praise, correction,
+         new_word, audio_base64, user_id
+       )
+       SELECT * FROM unnest(
+         $1::text[], $2::text[], $3::bigint[], $4::text[], $5::text[],
+         $6::text[], $7::text[], $8::text[], $9::text[], $10::text[]
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         session_id = excluded.session_id,
+         created_at = excluded.created_at,
+         role = excluded.role,
+         text = excluded.text,
+         praise = excluded.praise,
+         correction = excluded.correction,
+         new_word = excluded.new_word,
+         audio_base64 = COALESCE(excluded.audio_base64, messages.audio_base64),
+         user_id = COALESCE(excluded.user_id, messages.user_id)`,
+      [
+        messages.map((m) => m.id),
+        messages.map((m) => m.sessionId),
+        messages.map((m) => String(m.createdAt)),
+        messages.map((m) => m.role),
+        messages.map((m) => m.text),
+        messages.map((m) => m.praise ?? null),
+        messages.map((m) => m.correction ?? null),
+        messages.map((m) => m.newWord ?? null),
+        messages.map((m) => m.audioBase64 ?? null),
+        messages.map(() => userId),
+      ]
+    );
+    await client.query("COMMIT");
+    return messages.length;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
-export function deleteMessagesBySession(
+export async function deleteMessagesBySession(
   userId: string,
   sessionId: string
-): number {
-  const info = getDb()
-    .prepare("DELETE FROM messages WHERE user_id = ? AND session_id = ?")
-    .run(userId, sessionId);
-  return info.changes;
+): Promise<number> {
+  const rows = await query<{ deleted: number }>(
+    `DELETE FROM messages WHERE user_id = $1 AND session_id = $2
+     RETURNING 1::int AS deleted`,
+    [userId, sessionId]
+  );
+  return rows.length;
 }
 
-export function deleteAllMessages(userId: string): number {
-  const info = getDb()
-    .prepare("DELETE FROM messages WHERE user_id = ?")
-    .run(userId);
-  return info.changes;
+export async function deleteAllMessages(userId: string): Promise<number> {
+  const rows = await query<{ deleted: number }>(
+    "DELETE FROM messages WHERE user_id = $1 RETURNING 1::int AS deleted",
+    [userId]
+  );
+  return rows.length;
 }
 
-export function updateMessageAudio(
+export async function updateMessageAudio(
   userId: string,
   id: string,
   audioBase64: string
-): boolean {
-  const info = getDb()
-    .prepare(
-      "UPDATE messages SET audio_base64 = ? WHERE user_id = ? AND id = ?"
-    )
-    .run(audioBase64, userId, id);
-  return info.changes > 0;
+): Promise<boolean> {
+  const rows = await query<{ id: string }>(
+    `UPDATE messages SET audio_base64 = $1
+     WHERE user_id = $2 AND id = $3 RETURNING id`,
+    [audioBase64, userId, id]
+  );
+  return rows.length > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,18 +436,19 @@ export function updateMessageAudio(
 // registered user. Later registrations never adopt; stray rows only warn.
 // ---------------------------------------------------------------------------
 
-export function countOrphanMessages(): number {
-  const row = getDb()
-    .prepare("SELECT COUNT(*) AS n FROM messages WHERE user_id IS NULL")
-    .get() as { n: number };
-  return row.n;
+export async function countOrphanMessages(): Promise<number> {
+  const rows = await query<{ count: number }>(
+    "SELECT COUNT(*)::int AS count FROM messages WHERE user_id IS NULL"
+  );
+  return rows[0].count;
 }
 
-export function adoptOrphanMessages(userId: string): number {
-  const info = getDb()
-    .prepare("UPDATE messages SET user_id = ? WHERE user_id IS NULL")
-    .run(userId);
-  return info.changes;
+export async function adoptOrphanMessages(userId: string): Promise<number> {
+  const rows = await query<{ id: string }>(
+    "UPDATE messages SET user_id = $1 WHERE user_id IS NULL RETURNING id",
+    [userId]
+  );
+  return rows.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -495,107 +467,111 @@ function rowToSessionMeta(row: SessionMetaRow): StoredSessionMeta {
     ...(row.lesson_id !== null ? { lessonId: row.lesson_id } : {}),
     ...(row.lesson_title !== null ? { lessonTitle: row.lesson_title } : {}),
     ...(row.duration_minutes !== null
-      ? { durationMinutes: row.duration_minutes }
+      ? { durationMinutes: Number(row.duration_minutes) }
       : {}),
     ...(row.completed_steps !== null
-      ? { completedSteps: row.completed_steps }
+      ? { completedSteps: Number(row.completed_steps) }
       : {}),
-    ...(row.total_steps !== null ? { totalSteps: row.total_steps } : {}),
-    ...(row.stars_earned !== null ? { starsEarned: row.stars_earned } : {}),
+    ...(row.total_steps !== null ? { totalSteps: Number(row.total_steps) } : {}),
+    ...(row.stars_earned !== null
+      ? { starsEarned: Number(row.stars_earned) }
+      : {}),
     ...(row.corrections_count !== null
-      ? { correctionsCount: row.corrections_count }
+      ? { correctionsCount: Number(row.corrections_count) }
       : {}),
-    ...(row.timed_out === 1 ? { timedOut: true } : {}),
+    ...(row.timed_out === true ? { timedOut: true } : {}),
     ...(row.accent !== null ? { accent: row.accent } : {}),
     ...(row.title !== null ? { title: row.title } : {}),
-    ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
-    ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
-    ...(row.duration_ms !== null ? { durationMs: row.duration_ms } : {}),
-    updatedAt: row.updated_at,
+    ...(row.started_at !== null ? { startedAt: Number(row.started_at) } : {}),
+    ...(row.ended_at !== null ? { endedAt: Number(row.ended_at) } : {}),
+    ...(row.duration_ms !== null ? { durationMs: Number(row.duration_ms) } : {}),
+    updatedAt: Number(row.updated_at),
   };
 }
 
 /** All session metadata rows for a user, oldest first. */
-export function listSessionMeta(userId: string): StoredSessionMeta[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT id, user_id, type, lesson_id, lesson_title, duration_minutes,
-              completed_steps, total_steps, stars_earned, corrections_count,
-              timed_out, accent, title, started_at, ended_at, duration_ms,
-              updated_at
-       FROM session_meta WHERE user_id = ? ORDER BY updated_at ASC`
-    )
-    .all(userId) as SessionMetaRow[];
+export async function listSessionMeta(
+  userId: string
+): Promise<StoredSessionMeta[]> {
+  const rows = await query<SessionMetaRow>(
+    `SELECT id, user_id, type, lesson_id, lesson_title, duration_minutes,
+            completed_steps, total_steps, stars_earned, corrections_count,
+            timed_out, accent, title, started_at, ended_at, duration_ms,
+            updated_at
+     FROM session_meta WHERE user_id = $1 ORDER BY updated_at ASC`,
+    [userId]
+  );
   return rows.map(rowToSessionMeta);
 }
 
 /** Upsert one session-metadata row. */
-export function upsertSessionMeta(
+export async function upsertSessionMeta(
   userId: string,
   meta: StoredSessionMeta
-): void {
-  getDb()
-    .prepare(
-      `INSERT INTO session_meta (
-         id, user_id, type, lesson_id, lesson_title, duration_minutes,
-         completed_steps, total_steps, stars_earned, corrections_count,
-         timed_out, accent, title, started_at, ended_at, duration_ms, updated_at
-       ) VALUES (
-         @id, @userId, @type, @lessonId, @lessonTitle, @durationMinutes,
-         @completedSteps, @totalSteps, @starsEarned, @correctionsCount,
-         @timedOut, @accent, @title, @startedAt, @endedAt, @durationMs, @updatedAt
-       )
-       ON CONFLICT(id) DO UPDATE SET
-         type = excluded.type,
-         lesson_id = excluded.lesson_id,
-         lesson_title = excluded.lesson_title,
-         duration_minutes = excluded.duration_minutes,
-         completed_steps = excluded.completed_steps,
-         total_steps = excluded.total_steps,
-         stars_earned = excluded.stars_earned,
-         corrections_count = excluded.corrections_count,
-         timed_out = excluded.timed_out,
-         accent = excluded.accent,
-         title = excluded.title,
-         started_at = excluded.started_at,
-         ended_at = excluded.ended_at,
-         duration_ms = excluded.duration_ms,
-         updated_at = excluded.updated_at`
-    )
-    .run({
-      id: meta.id,
+): Promise<void> {
+  await query(
+    `INSERT INTO session_meta (
+       id, user_id, type, lesson_id, lesson_title, duration_minutes,
+       completed_steps, total_steps, stars_earned, corrections_count,
+       timed_out, accent, title, started_at, ended_at, duration_ms, updated_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+       $11, $12, $13, $14, $15, $16, $17
+     )
+     ON CONFLICT (id) DO UPDATE SET
+       type = excluded.type,
+       lesson_id = excluded.lesson_id,
+       lesson_title = excluded.lesson_title,
+       duration_minutes = excluded.duration_minutes,
+       completed_steps = excluded.completed_steps,
+       total_steps = excluded.total_steps,
+       stars_earned = excluded.stars_earned,
+       corrections_count = excluded.corrections_count,
+       timed_out = excluded.timed_out,
+       accent = excluded.accent,
+       title = excluded.title,
+       started_at = excluded.started_at,
+       ended_at = excluded.ended_at,
+       duration_ms = excluded.duration_ms,
+       updated_at = excluded.updated_at`,
+    [
+      meta.id,
       userId,
-      type:
-        meta.type === "lesson"
-          ? "lesson"
-          : meta.type === "call"
-            ? "call"
-            : "chat",
-      lessonId: meta.lessonId ?? null,
-      lessonTitle: meta.lessonTitle ?? null,
-      durationMinutes: meta.durationMinutes ?? null,
-      completedSteps: meta.completedSteps ?? null,
-      totalSteps: meta.totalSteps ?? null,
-      starsEarned: meta.starsEarned ?? null,
-      correctionsCount: meta.correctionsCount ?? null,
-      timedOut: meta.timedOut ? 1 : 0,
-      accent: meta.accent ?? null,
-      title: meta.title ?? null,
-      startedAt: meta.startedAt ?? null,
-      endedAt: meta.endedAt ?? null,
-      durationMs: meta.durationMs ?? null,
-      updatedAt: meta.updatedAt,
-    });
+      meta.type === "lesson" ? "lesson" : meta.type === "call" ? "call" : "chat",
+      meta.lessonId ?? null,
+      meta.lessonTitle ?? null,
+      meta.durationMinutes ?? null,
+      meta.completedSteps ?? null,
+      meta.totalSteps ?? null,
+      meta.starsEarned ?? null,
+      meta.correctionsCount ?? null,
+      meta.timedOut ? true : false,
+      meta.accent ?? null,
+      meta.title ?? null,
+      meta.startedAt ?? null,
+      meta.endedAt ?? null,
+      meta.durationMs ?? null,
+      meta.updatedAt,
+    ]
+  );
 }
 
-export function deleteSessionMeta(userId: string, id: string): number {
-  return getDb()
-    .prepare("DELETE FROM session_meta WHERE user_id = ? AND id = ?")
-    .run(userId, id).changes;
+export async function deleteSessionMeta(
+  userId: string,
+  id: string
+): Promise<number> {
+  const rows = await query<{ deleted: number }>(
+    `DELETE FROM session_meta WHERE user_id = $1 AND id = $2
+     RETURNING 1::int AS deleted`,
+    [userId, id]
+  );
+  return rows.length;
 }
 
-export function deleteAllSessionMeta(userId: string): number {
-  return getDb()
-    .prepare("DELETE FROM session_meta WHERE user_id = ?")
-    .run(userId).changes;
+export async function deleteAllSessionMeta(userId: string): Promise<number> {
+  const rows = await query<{ deleted: number }>(
+    "DELETE FROM session_meta WHERE user_id = $1 RETURNING 1::int AS deleted",
+    [userId]
+  );
+  return rows.length;
 }

@@ -29,7 +29,7 @@ export async function GET() {
     if (!user) {
       return Response.json({ error: "Not authenticated" }, { status: 401 });
     }
-    return Response.json({ messages: listMessages(user.id) });
+    return Response.json({ messages: await listMessages(user.id) });
   } catch (error) {
     console.error("🗄️ [messages] GET failed:", error);
     return Response.json({ error: "Failed to read messages" }, { status: 500 });
@@ -49,7 +49,7 @@ export async function POST(request: Request) {
     }
     // Client-sent user identity is ignored — the session is authoritative.
     const messages = raw.filter(isStoredMessage);
-    const count = upsertMessages(user.id, messages);
+    const count = await upsertMessages(user.id, messages);
     return Response.json({ saved: count });
   } catch (error) {
     console.error("🗄️ [messages] POST failed:", error);
@@ -74,7 +74,7 @@ export async function PATCH(request: Request) {
         { status: 400 }
       );
     }
-    const ok = updateMessageAudio(user.id, id, audioBase64);
+    const ok = await updateMessageAudio(user.id, id, audioBase64);
     return Response.json({ updated: ok });
   } catch (error) {
     console.error("🗄️ [messages] PATCH failed:", error);
@@ -91,8 +91,8 @@ export async function DELETE(request: Request) {
     const sessionId = new URL(request.url).searchParams.get("sessionId");
     const deleted =
       sessionId === null
-        ? deleteAllMessages(user.id)
-        : deleteMessagesBySession(user.id, sessionId);
+        ? await deleteAllMessages(user.id)
+        : await deleteMessagesBySession(user.id, sessionId);
     return Response.json({ deleted });
   } catch (error) {
     console.error("🗄️ [messages] DELETE failed:", error);

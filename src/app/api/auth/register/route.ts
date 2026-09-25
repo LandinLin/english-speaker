@@ -34,7 +34,7 @@ export async function POST(request: Request) {
       return Response.json({ error: passwordError }, { status: 400 });
     }
 
-    if (getUserByUsername(username)) {
+    if (await getUserByUsername(username)) {
       return Response.json(
         { error: "That username is already taken. Try another one!" },
         { status: 409 }
@@ -42,15 +42,15 @@ export async function POST(request: Request) {
     }
 
     // Orphan (pre-auth) messages are adopted ONLY by the first user.
-    const isFirstUser = countUsers() === 0;
-    const orphanCount = countOrphanMessages();
+    const isFirstUser = (await countUsers()) === 0;
+    const orphanCount = await countOrphanMessages();
     if (!isFirstUser && orphanCount > 0) {
       console.warn(
         `⚠️ [auth] ${orphanCount} orphan messages found during non-first registration; leaving them unassigned.`
       );
     }
 
-    const user = createUser({
+    const user = await createUser({
       id: randomUUID(),
       username,
       displayName: username,
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
     });
 
     if (isFirstUser && orphanCount > 0) {
-      const adopted = adoptOrphanMessages(user.id);
+      const adopted = await adoptOrphanMessages(user.id);
       console.log(`🏠 [auth] First user adopted ${adopted} existing messages.`);
     }
 

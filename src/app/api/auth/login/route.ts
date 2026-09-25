@@ -47,7 +47,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const user = getUserByUsername(username);
+    const user = await getUserByUsername(username);
     if (!user || !verifyPassword(password, user.passwordHash)) {
       return Response.json(
         { error: "Invalid username or password." },

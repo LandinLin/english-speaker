@@ -1,7 +1,11 @@
 {
+  "id": "/",
   "name": "English Buddy",
   "short_name": "English Buddy",
   "description": "Practice English speaking with AI",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["education"],
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -26,6 +30,45 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Start a Call",
+      "short_name": "Call",
+      "description": "Start a voice call with your English teacher",
+      "url": "/call",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Lessons",
+      "short_name": "Lessons",
+      "description": "Browse interactive English lessons",
+      "url": "/dashboard",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "History",
+      "short_name": "History",
+      "description": "Review past chats, lessons, and calls",
+      "url": "/history",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshot-home.png",
+      "sizes": "1440x960",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Today's practice home"
+    },
+    {
+      "src": "/screenshot-history.png",
+      "sizes": "1440x960",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Chat, lesson, and call history"
     }
   ]
 }

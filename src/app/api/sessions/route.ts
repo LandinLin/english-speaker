@@ -26,7 +26,7 @@ export async function GET() {
     if (!user) {
       return Response.json({ error: "Not authenticated" }, { status: 401 });
     }
-    return Response.json({ sessions: listSessionMeta(user.id) });
+    return Response.json({ sessions: await listSessionMeta(user.id) });
   } catch (error) {
     console.error("🗄️ [sessions] GET failed:", error);
     return Response.json({ error: "Failed to read sessions" }, { status: 500 });
@@ -53,11 +53,11 @@ export async function POST(request: Request) {
     const sessions = Array.isArray(rawSessions)
       ? rawSessions.filter(isSessionMeta)
       : [];
-    for (const meta of sessions) upsertSessionMeta(user.id, meta);
+    for (const meta of sessions) await upsertSessionMeta(user.id, meta);
     let deleted = 0;
     if (Array.isArray(rawDeletions)) {
       for (const id of rawDeletions) {
-        if (typeof id === "string") deleted += deleteSessionMeta(user.id, id);
+        if (typeof id === "string") deleted += await deleteSessionMeta(user.id, id);
       }
     }
     console.log(
@@ -78,14 +78,14 @@ export async function DELETE(request: Request) {
     }
     const url = new URL(request.url);
     if (url.searchParams.get("all") === "1") {
-      const deleted = deleteAllSessionMeta(user.id);
+      const deleted = await deleteAllSessionMeta(user.id);
       return Response.json({ deleted });
     }
     const id = url.searchParams.get("id");
     if (!id) {
       return Response.json({ error: "id required" }, { status: 400 });
     }
-    const deleted = deleteSessionMeta(user.id, id);
+    const deleted = await deleteSessionMeta(user.id, id);
     return Response.json({ deleted });
   } catch (error) {
     console.error("🗄️ [sessions] DELETE failed:", error);

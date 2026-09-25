@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // better-sqlite3 is a native addon — keep it out of the bundler.
+  // Native/network Node packages — keep them out of the bundler.
   // msedge-tts uses the `ws` WebSocket client + Node streams — keep external.
-  serverExternalPackages: ["better-sqlite3", "msedge-tts"],
+  serverExternalPackages: ["pg", "msedge-tts"],
   async headers() {
     return [
       {
