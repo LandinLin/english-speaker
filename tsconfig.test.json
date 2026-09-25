@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Node's type-stripping runner needs explicit .ts specifiers; keep that
+    // allowance scoped to test files instead of the whole project.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*.test.ts"],
+  "exclude": ["node_modules"]
+}

@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { VoiceActivityDetector } from "@/lib/vad";
-import { playClip, stopPlayback } from "@/lib/audioPlayer";
+import { VoiceActivityDetector, VAD_CONFIG } from "@/lib/vad";
+import { stopPlayback } from "@/lib/audioPlayer";
 import {
-  addExchange,
+  addCallExchange,
   appendNotice,
+  beginCallSession,
   beginNewSession,
+  finalizeCallSession,
   useMessages,
 } from "@/lib/messageStore";
 import { getAccentPreference, useAccent } from "@/lib/accentStore";
@@ -18,6 +20,7 @@ type Phase =
   | "recording"
   | "processing"
   | "speaking"
+  | "mic-denied"
   | "ended";
 
 interface ConversationResponse {
@@ -32,269 +35,587 @@ interface ConversationResponse {
   error?: string;
 }
 
+interface Caption {
+  id: number;
+  user: string;
+  buddy: string;
+}
+
 const HISTORY_LIMIT = 4;
+
+/** Bound a single call to protect the child and limit API spend. */
+const MAX_CALL_MS = 15 * 60_000;
+/** "Call ending soon" heads-up before the hard cap. */
+const CALL_WARN_MS = MAX_CALL_MS - 30_000;
+
+/** Codec preference order — Opus/webm is the broadly supported best. */
+const RECORDER_CODECS = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/mp4",
+  "audio/ogg;codecs=opus",
+] as const;
+
+function pickRecorderMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  for (const candidate of RECORDER_CODECS) {
+    if (MediaRecorder.isTypeSupported(candidate)) {
+      console.log("🎙️ [call] MediaRecorder codec selected:", candidate);
+      return candidate;
+    }
+  }
+  console.warn(
+    "🎙️ [call] None of the preferred codecs are supported; using browser default"
+  );
+  return undefined;
+}
+
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
 
 export default function AudioCall() {
   const { accent, voice } = useAccent();
   const allMessages = useMessages();
+
   const [phase, setPhase] = useState<Phase>("idle");
   const [muted, setMuted] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [caption, setCaption] = useState<{ user: string; buddy: string } | null>(
-    null
-  );
+  const [elapsed, setElapsed] = useState(0);
+  const [endingSoon, setEndingSoon] = useState(false);
+  const [captions, setCaptions] = useState<Caption[]>([]);
 
-  // Refs mirror state so the VAD callbacks (fired from rAF) read fresh values
-  // without stale closures.
+  // phase mirrored in a ref so rAF-driven VAD callbacks never read stale state
   const phaseRef = useRef<Phase>("idle");
-  const mutedRef = useRef(false);
-  const setPhaseBoth = (p: Phase) => {
+  const setPhaseBoth = useCallback((p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
-  };
+  }, []);
 
+  // Monotonic session token. Incremented on every start and every end;
+  // any async callback from a previous session bails when it doesn't match.
+  const sessionRef = useRef(0);
+  const mutedRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const vadRef = useRef<VoiceActivityDetector | null>(null);
   const aiAudioRef = useRef<HTMLAudioElement | null>(null);
-  // Keep the call's recent exchanges for the API history parameter.
+  const abortRef = useRef<AbortController | null>(null);
+  // submitSegment is declared after beginRecording; a ref breaks the cycle.
+  const submitSegmentRef = useRef<
+    ((session: number) => Promise<void>) | null
+  >(null);
+  const connectedAtRef = useRef<number | null>(null);
+  const captionIdRef = useRef(0);
+  // Persisted session row (type "call") for the currently active call.
+  const callSessionIdRef = useRef<string | null>(null);
+  const allMessagesRef = useRef(allMessages);
   const historyRef = useRef<{ role: "user" | "assistant"; content: string }[]>(
     []
   );
 
-  // Seed history from the latest chat session so the call has context.
+  // Seed history from recent messages so the call has context. A snapshot is
+  // taken when a call starts; exchanges within the call then accumulate here,
+  // keeping the API history identical to the persisted call transcript.
   useEffect(() => {
+    allMessagesRef.current = allMessages;
     historyRef.current = allMessages.slice(-HISTORY_LIMIT).map((m) => ({
       role: m.role === "user" ? "user" : "assistant",
       content: m.text,
     }));
   }, [allMessages]);
 
-  const teardown = useCallback(() => {
-    vadRef.current?.setMuted(true);
+  // ── Resource teardown (idempotent; safe for rapid start/end cycles) ──
+
+  const releaseResources = useCallback(() => {
     vadRef.current?.stop();
     vadRef.current = null;
-    recorderRef.current?.stop();
+    // Unmount/hang-up while still on the permission prompt: close the
+    // gesture-primed context that start() never got to consume.
+    VoiceActivityDetector.cancelPrime();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.onstop = null; // discard: no submit from a torn-down recorder
+      try {
+        recorder.stop();
+      } catch {
+        // already stopping
+      }
+    }
     recorderRef.current = null;
     chunksRef.current = [];
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
-    if (aiAudioRef.current) {
-      aiAudioRef.current.onended = null;
-      aiAudioRef.current.pause();
-      aiAudioRef.current.src = "";
+    const audio = aiAudioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.src = "";
       aiAudioRef.current = null;
     }
     stopPlayback();
   }, []);
 
-  // Clean up on unmount.
-  useEffect(() => () => teardown(), [teardown]);
+  // Persist the call's final metadata (or discard it if no speech happened).
+  // "beacon" transport survives refresh / tab close via navigator.sendBeacon.
+  const finalizeActiveCall = useCallback(
+    (transport: "fetch" | "beacon" = "fetch") => {
+      const sid = callSessionIdRef.current;
+      if (sid === null) return;
+      const durationMs = connectedAtRef.current
+        ? Date.now() - connectedAtRef.current
+        : 0;
+      callSessionIdRef.current = null;
+      finalizeCallSession(sid, durationMs, transport);
+    },
+    []
+  );
 
-  const submitSegment = useCallback(async () => {
-    const blob = new Blob(chunksRef.current, {
-      type: chunksRef.current[0]?.type || "audio/webm",
-    });
-    chunksRef.current = [];
-    recorderRef.current = null;
+  // Route change / unmount: release devices and finalize whatever was active.
+  useEffect(() => {
+    return () => {
+      finalizeActiveCall("fetch");
+      releaseResources();
+    };
+  }, [finalizeActiveCall, releaseResources]);
 
-    if (blob.size === 0) {
-      setPhaseBoth("listening");
-      vadRef.current?.setMuted(mutedRef.current);
+  // Browser refresh / tab close mid-call: per-exchange writes already landed;
+  // send the final duration with a beacon so History keeps an accurate call.
+  useEffect(() => {
+    const onPageHide = () => {
+      finalizeActiveCall("beacon");
+      releaseResources();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [finalizeActiveCall, releaseResources]);
+
+  // ── Call timing ─────────────────────────────────────────────────────
+
+  const endCallRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    if (
+      phase !== "listening" &&
+      phase !== "recording" &&
+      phase !== "processing" &&
+      phase !== "speaking"
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      const start = connectedAtRef.current;
+      if (start === null) return;
+      const ms = Date.now() - start;
+      setElapsed(Math.floor(ms / 1000));
+      if (!endingSoon && ms >= CALL_WARN_MS) {
+        setEndingSoon(true);
+        appendNotice(
+          "⏰ Call ending in 30 seconds — say goodbye!",
+          callSessionIdRef.current ?? undefined
+        );
+      }
+      if (ms >= MAX_CALL_MS) {
+        window.clearInterval(timer);
+        endCallRef.current?.();
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [phase, endingSoon]);
+
+  // ── Recording + submission ──────────────────────────────────────────
+
+  const beginRecording = useCallback(
+    (session: number) => {
+      const stream = streamRef.current;
+      if (!stream || sessionRef.current !== session) return;
+      try {
+        chunksRef.current = [];
+        const mimeType = pickRecorderMimeType();
+        const recorder = new MediaRecorder(
+          stream,
+          mimeType ? { mimeType } : undefined
+        );
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunksRef.current.push(e.data);
+        };
+        recorder.onstop = () => {
+          // Stale session (End pressed, or a newer call started): discard.
+          if (sessionRef.current !== session) {
+            chunksRef.current = [];
+            recorderRef.current = null;
+            return;
+          }
+          void submitSegmentRef.current?.(session);
+        };
+        recorder.start();
+        recorderRef.current = recorder;
+        setPhaseBoth("recording");
+      } catch (err) {
+        console.error("📞 [call] Failed to start recorder:", err);
+      }
+    },
+    [setPhaseBoth]
+  );
+
+  const submitSegment = useCallback(
+    async (session: number) => {
+      const chunks = chunksRef.current;
+      chunksRef.current = [];
+      recorderRef.current = null;
+
+      if (chunks.length === 0 || sessionRef.current !== session) {
+        if (sessionRef.current === session) setPhaseBoth("listening");
+        return;
+      }
+
+      const mimeType = chunks[0]?.type || "audio/webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      if (blob.size === 0) {
+        if (sessionRef.current === session) setPhaseBoth("listening");
+        return;
+      }
+
+      const ext = mimeType.includes("mp4")
+        ? "m4a"
+        : mimeType.includes("ogg")
+          ? "ogg"
+          : "webm";
+      const formData = new FormData();
+      formData.append(
+        "audio",
+        new File([blob], `speech.${ext}`, { type: mimeType })
+      );
+      formData.append("history", JSON.stringify(historyRef.current));
+      formData.append("accent", accent);
+      formData.append("voice", voice);
+
+      setPhaseBoth("processing");
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      try {
+        const res = await fetch("/api/conversation", {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        });
+        if (sessionRef.current !== session) return; // ended / superseded
+
+        const data: ConversationResponse = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || `Request failed (${res.status})`);
+        }
+
+        const transcript = data.transcript ?? "";
+        const aiText = data.aiText ?? "";
+        historyRef.current = [
+          ...historyRef.current,
+          { role: "user" as const, content: transcript },
+          { role: "assistant" as const, content: aiText },
+        ].slice(-HISTORY_LIMIT);
+
+        const callSid = callSessionIdRef.current;
+        if (callSid) {
+          addCallExchange(callSid, {
+            transcript,
+            aiText,
+            praise: data.feedback?.praise,
+            correction: data.feedback?.correction,
+            newWord: data.feedback?.newWord,
+            audioBase64: data.audioBase64,
+            accent: getAccentPreference().accent,
+          });
+        }
+
+        setCaptions((prev) => {
+          const next = [
+            ...prev,
+            { id: ++captionIdRef.current, user: transcript, buddy: aiText },
+          ];
+          return next.slice(-2);
+        });
+
+        setPhaseBoth("speaking");
+
+        if (data.audioBase64) {
+          const audioEl = new Audio(
+            `data:audio/mpeg;base64,${data.audioBase64}`
+          );
+          aiAudioRef.current = audioEl;
+
+          const resumeListening = () => {
+            if (sessionRef.current !== session) return;
+            if (aiAudioRef.current === audioEl) aiAudioRef.current = null;
+            setPhaseBoth("listening");
+            // Guard the AI's own audio tail from being re-detected.
+            vadRef.current?.beginCooldown(VAD_CONFIG.cooldownMs);
+          };
+
+          audioEl.onended = resumeListening;
+          audioEl.onerror = () => {
+            console.error("🔊 [call] AI audio playback failed");
+            resumeListening();
+          };
+          try {
+            await audioEl.play();
+          } catch (err) {
+            console.warn("🔊 [call] AI playback could not start:", err);
+            resumeListening();
+          }
+        } else {
+          setPhaseBoth("listening");
+          vadRef.current?.beginCooldown(VAD_CONFIG.cooldownMs);
+        }
+      } catch (err) {
+        if (controller.signal.aborted || sessionRef.current !== session) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("📞 [call] Conversation failed:", err);
+        appendNotice(
+          "Oops! I didn't catch that. Let's try again!",
+          callSessionIdRef.current ?? undefined
+        );
+        setPhaseBoth("listening");
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+      }
+    },
+    [accent, voice, setPhaseBoth]
+  );
+  useEffect(() => {
+    submitSegmentRef.current = submitSegment;
+  }, [submitSegment]);
+
+  // ── Barge-in: user talks over Buddy (or while we're waiting) ────────
+
+  const bargeIn = useCallback(
+    (session: number) => {
+      if (sessionRef.current !== session) return;
+      console.log("📞 [call] Barge-in detected — stopping Buddy");
+      // 1) Kill AI audio immediately (detach onended so it can't reset state).
+      const audioEl = aiAudioRef.current;
+      if (audioEl) {
+        audioEl.onended = null;
+        audioEl.onerror = null;
+        audioEl.pause();
+        audioEl.src = "";
+        aiAudioRef.current = null;
+      }
+      // 2) Abort an in-flight reply fetch (processing phase).
+      abortRef.current?.abort();
+      abortRef.current = null;
+      // 3) Start capturing the new utterance right away.
+      beginRecording(session);
+    },
+    [beginRecording]
+  );
+
+  // ── VAD callbacks (created per session inside startCall) ────────────
+
+  const startCall = useCallback(async () => {
+    // Rapid Start → End → Start: always fully release the old session first.
+    releaseResources();
+    const session = sessionRef.current + 1;
+    sessionRef.current = session;
+    mutedRef.current = false;
+    setMuted(false);
+    setEndingSoon(false);
+    setElapsed(0);
+    setCaptions([]);
+    setPhaseBoth("connecting");
+
+    // Create the VAD's AudioContext synchronously, inside this click task:
+    // a slow mic-permission prompt would otherwise leave it born suspended.
+    VoiceActivityDetector.prime();
+
+    let stream: MediaStream;
+    try {
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (sessionRef.current !== session) {
+        // Ended while the permission prompt was open.
+        stream.getTracks().forEach((t) => t.stop());
+        VoiceActivityDetector.cancelPrime();
+        return;
+      }
+      streamRef.current = stream;
+
+      // Verify the browser actually honored the processing constraints.
+      const settings = stream.getAudioTracks()[0]?.getSettings();
+      if (settings) {
+        for (const key of [
+          "echoCancellation",
+          "noiseSuppression",
+          "autoGainControl",
+        ] as const) {
+          if (settings[key] === false) {
+            console.warn(
+              `⚠️ [call] Browser reported ${key}=false; audio quality may suffer`
+            );
+          }
+        }
+      }
+    } catch (err) {
+      if (sessionRef.current !== session) return;
+      console.error("📞 [call] Microphone unavailable:", err);
+      VoiceActivityDetector.cancelPrime();
+      releaseResources();
+      setPhaseBoth("mic-denied");
       return;
     }
 
-    const formData = new FormData();
-    formData.append(
-      "audio",
-      new File([blob], "speech.webm", { type: blob.type })
-    );
-    formData.append("history", JSON.stringify(historyRef.current));
-    formData.append("accent", accent);
-    formData.append("voice", voice);
-
-    try {
-      const res = await fetch("/api/conversation", {
-        method: "POST",
-        body: formData,
-      });
-      const data: ConversationResponse = await res.json();
-      if (!res.ok || data.error) {
-        throw new Error(data.error || `Request failed (${res.status})`);
-      }
-
-      const transcript = data.transcript ?? "";
-      const aiText = data.aiText ?? "";
-
-      historyRef.current = [
-        ...historyRef.current,
-        { role: "user" as const, content: transcript },
-        { role: "assistant" as const, content: aiText },
-      ].slice(-HISTORY_LIMIT);
-
-      // Persist to the shared message store so the call shows in History.
-      const { ai } = addExchange({
-        transcript,
-        aiText,
-        praise: data.feedback?.praise,
-        correction: data.feedback?.correction,
-        newWord: data.feedback?.newWord,
-        audioBase64: data.audioBase64,
-        accent: getAccentPreference().accent,
-      });
-
-      setCaption({ user: transcript, buddy: aiText });
-      setPhaseBoth("speaking");
-
-      if (data.audioBase64) {
-        const audio = new Audio(
-          `data:audio/mpeg;base64,${data.audioBase64}`
-        );
-        aiAudioRef.current = audio;
-        audio.onended = () => {
-          aiAudioRef.current = null;
-          // Resume listening after Buddy finishes talking.
+    const vad = new VoiceActivityDetector({
+      onSpeechStart: () => {
+        if (sessionRef.current !== session || mutedRef.current) return;
+        const p = phaseRef.current;
+        if (p === "listening") {
+          beginRecording(session);
+        } else if (p === "speaking" || p === "processing") {
+          bargeIn(session);
+        }
+      },
+      onSpeechEnd: (reason) => {
+        if (sessionRef.current !== session || mutedRef.current) return;
+        if (phaseRef.current !== "recording") return;
+        const recorder = recorderRef.current;
+        if (reason === "cancel") {
+          // Sub-minimum click/pop: discard the recording, stay in call.
+          if (recorder && recorder.state !== "inactive") {
+            recorder.onstop = null;
+            try {
+              recorder.stop();
+            } catch {
+              // ignore
+            }
+          }
+          recorderRef.current = null;
+          chunksRef.current = [];
           setPhaseBoth("listening");
-          vadRef.current?.setMuted(mutedRef.current);
-        };
-        audio.onerror = () => {
-          console.error("🔊 [call] AI audio playback failed");
-          aiAudioRef.current = null;
-          setPhaseBoth("listening");
-          vadRef.current?.setMuted(mutedRef.current);
-        };
-        void audio.play().catch((err) => {
-          console.warn("🔊 [call] Autoplay blocked:", err);
-          // Fall back to the global player (user can tap to retry there).
-          if (ai.audioBase64) playClip(ai.id, `data:audio/mpeg;base64,${ai.audioBase64}`);
-          setPhaseBoth("listening");
-          vadRef.current?.setMuted(mutedRef.current);
-        });
-      } else {
-        // No audio (TTS failed): still show text and keep listening.
-        setPhaseBoth("listening");
-        vadRef.current?.setMuted(mutedRef.current);
-      }
-    } catch (err) {
-      console.error("📞 [call] Conversation failed:", err);
-      appendNotice("Oops! I didn't catch that. Let's try again!");
-      setPhaseBoth("listening");
-      vadRef.current?.setMuted(mutedRef.current);
-    }
-  }, [accent, voice]);
-
-  // VAD callbacks.
-  const onSpeechStart = useCallback(() => {
-    if (phaseRef.current !== "listening") return;
-    const stream = streamRef.current;
-    if (!stream) return;
+          return;
+        }
+        if (recorder && recorder.state !== "inactive") {
+          try {
+            recorder.stop(); // → onstop → submitSegment
+          } catch {
+            chunksRef.current = [];
+            recorderRef.current = null;
+            setPhaseBoth("listening");
+          }
+        }
+      },
+    });
     try {
-      chunksRef.current = [];
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
-        ? "audio/webm"
-        : undefined;
-      const recorder = new MediaRecorder(
-        stream,
-        mimeType ? { mimeType } : undefined
-      );
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-      recorder.onstop = () => void submitSegment();
-      recorder.start();
-      recorderRef.current = recorder;
-      setPhaseBoth("recording");
-    } catch (err) {
-      console.error("📞 [call] Failed to start recorder:", err);
-    }
-  }, [submitSegment]);
-
-  const onSpeechEnd = useCallback(() => {
-    if (phaseRef.current !== "recording") return;
-    // Mute VAD while we submit + Buddy replies so the AI's voice from the
-    // speakers isn't picked up and re-submitted.
-    vadRef.current?.setMuted(true);
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
-    } else {
-      chunksRef.current = [];
-      recorderRef.current = null;
-      setPhaseBoth("listening");
-      vadRef.current?.setMuted(mutedRef.current);
-    }
-    setPhaseBoth("processing");
-  }, []);
-
-  const startCall = useCallback(async () => {
-    setError(null);
-    setPhaseBoth("connecting");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      const vad = new VoiceActivityDetector({
-        onSpeechStart,
-        onSpeechEnd,
-      });
       await vad.start(stream);
-      vadRef.current = vad;
-
-      setCaption(null);
-      setPhaseBoth("listening");
     } catch (err) {
-      console.error("📞 [call] Mic access failed:", err);
-      setError(
-        "Please allow microphone access so Buddy can hear you."
-      );
-      setPhaseBoth("idle");
+      if (sessionRef.current !== session) return;
+      console.error("📞 [call] VAD failed to start:", err);
+      releaseResources();
+      setPhaseBoth("mic-denied");
+      return;
     }
-  }, [onSpeechStart, onSpeechEnd]);
+    vadRef.current = vad;
+    connectedAtRef.current = Date.now();
+    // Persist the call session immediately (typed "call") so an interrupted
+    // call still survives; every exchange below carries this explicit id.
+    callSessionIdRef.current = beginCallSession(
+      getAccentPreference().accent
+    );
+    // Start this call's AI context from the pre-call snapshot; the call's own
+    // exchanges accumulate in historyRef as they land in the stored session.
+    historyRef.current = allMessagesRef.current.slice(-HISTORY_LIMIT).map(
+      (m) => ({
+        role: m.role === "user" ? ("user" as const) : ("assistant" as const),
+        content: m.text,
+      })
+    );
+    setPhaseBoth("listening");
+  }, [beginRecording, bargeIn, releaseResources, setPhaseBoth]);
+
+  // ── Controls ────────────────────────────────────────────────────────
+
+  const endCall = useCallback(() => {
+    sessionRef.current += 1; // invalidate every in-flight callback
+    finalizeActiveCall("fetch"); // record endedAt/durationMs (or discard)
+    releaseResources();
+    connectedAtRef.current = null;
+    mutedRef.current = false;
+    setMuted(false);
+    setEndingSoon(false);
+    setElapsed(0);
+    setPhaseBoth("ended");
+    // Next free-chat message starts a fresh chat session.
+    beginNewSession();
+  }, [finalizeActiveCall, releaseResources, setPhaseBoth]);
+  useEffect(() => {
+    endCallRef.current = endCall;
+  }, [endCall]);
 
   const toggleMute = useCallback(() => {
     const next = !mutedRef.current;
     mutedRef.current = next;
     setMuted(next);
+    const vad = vadRef.current;
     if (next) {
-      // Muting: stop any in-progress recording (discard it) and pause VAD.
-      vadRef.current?.setMuted(true);
+      vad?.setEnabled(false);
+      // Discard anything recorded so far — do NOT submit.
       const recorder = recorderRef.current;
       if (recorder && recorder.state !== "inactive") {
-        recorder.onstop = null; // don't submit
-        recorder.stop();
+        recorder.onstop = null;
+        try {
+          recorder.stop();
+        } catch {
+          // ignore
+        }
       }
       recorderRef.current = null;
       chunksRef.current = [];
-      if (phaseRef.current === "recording") {
-        setPhaseBoth("listening");
-      }
+      if (phaseRef.current === "recording") setPhaseBoth("listening");
     } else {
-      // Unmuting: resume VAD if we're idle/listening.
-      if (phaseRef.current === "listening") {
-        vadRef.current?.setMuted(false);
-      }
+      vad?.setEnabled(true);
+      // Ignore the sound of tapping unmute.
+      vad?.beginCooldown(150);
     }
-  }, []);
+  }, [setPhaseBoth]);
 
-  const endCall = useCallback(() => {
-    teardown();
-    setPhaseBoth("ended");
-    setMuted(false);
-    mutedRef.current = false;
-    setCaption(null);
-    // The next call should be a fresh conversation session.
-    beginNewSession();
-  }, [teardown]);
+  // Keyboard: Esc ends, M mutes (only while in a call).
+  useEffect(() => {
+    const inCall =
+      phase === "listening" ||
+      phase === "recording" ||
+      phase === "processing" ||
+      phase === "speaking";
+    if (!inCall) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        endCall();
+      } else if (e.key === "m" || e.key === "M") {
+        toggleMute();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [phase, endCall, toggleMute]);
 
-  const restartCall = useCallback(() => {
-    setError(null);
-    setCaption(null);
-    setPhaseBoth("idle");
-  }, []);
+  // ── Presentation ────────────────────────────────────────────────────
 
   const inCall =
-    phase !== "idle" && phase !== "connecting" && phase !== "ended";
+    phase === "listening" ||
+    phase === "recording" ||
+    phase === "processing" ||
+    phase === "speaking";
+
   const statusText =
     phase === "connecting"
       ? "Joining call…"
@@ -303,59 +624,105 @@ export default function AudioCall() {
           ? "Muted"
           : "Listening…"
         : phase === "recording"
-          ? "You're talking…"
+          ? "I'm hearing you…"
           : phase === "processing"
-            ? "Buddy is thinking…"
+            ? "Thinking…"
             : phase === "speaking"
-              ? "Buddy is talking…"
-              : phase === "ended"
-                ? "Call ended"
-                : "Tap to start a voice call";
+              ? "Buddy is speaking…"
+              : phase === "mic-denied"
+                ? "Microphone needed"
+                : phase === "ended"
+                  ? "Call ended"
+                  : "Tap to start a voice call";
+
+  const avatar =
+    phase === "recording"
+      ? "🎙️"
+      : phase === "processing"
+        ? "💭"
+        : phase === "speaking"
+          ? "🐣"
+          : "🐣";
+
+  const ringClass =
+    phase === "recording"
+      ? "bg-red-500/20 ring-4 ring-red-400/50 scale-110"
+      : phase === "speaking"
+        ? "bg-blue-500/20 ring-4 ring-blue-400/40 scale-105"
+        : phase === "processing"
+          ? "bg-amber-500/10 ring-4 ring-amber-400/30"
+          : inCall
+            ? "bg-green-500/10 ring-4 ring-green-400/30"
+            : "bg-slate-700/50";
+
+  const dotClass =
+    phase === "recording"
+      ? "animate-pulse bg-red-400"
+      : phase === "speaking"
+        ? "bg-blue-400"
+        : phase === "processing"
+          ? "animate-pulse bg-amber-400"
+          : phase === "listening"
+            ? "bg-green-400"
+            : "bg-slate-500";
 
   return (
-    <div className="flex h-full flex-col bg-gradient-to-b from-slate-800 to-slate-900">
+    <div
+      data-phase={phase}
+      className="relative flex h-full flex-col overflow-hidden bg-gradient-to-b from-slate-800 to-slate-900"
+    >
       {/* Header */}
       <div className="flex shrink-0 items-center justify-between px-4 pt-4 pb-3 text-white">
         <div className="flex items-center gap-2">
-          <span className="text-xl">📞</span>
+          <span className="text-xl" aria-hidden>
+            📞
+          </span>
           <div>
             <h2 className="text-sm font-bold">Voice Call with Buddy</h2>
-            <p className="flex items-center gap-1.5 text-[11px] text-slate-300">
-              <span
-                className={`inline-block h-2 w-2 rounded-full ${
-                  phase === "speaking"
-                    ? "bg-blue-400"
-                    : phase === "recording"
-                      ? "animate-pulse bg-red-400"
-                      : phase === "listening"
-                        ? "bg-green-400"
-                        : phase === "processing"
-                          ? "animate-pulse bg-amber-400"
-                          : "bg-slate-500"
-                }`}
-              />
+            <p
+              className="flex items-center gap-1.5 text-[11px] text-slate-300"
+              aria-live="polite"
+            >
+              <span className={`inline-block h-2 w-2 rounded-full ${dotClass}`} />
               {statusText}
             </p>
           </div>
         </div>
+        {inCall && (
+          <span
+            className="rounded-full bg-white/10 px-2.5 py-1 font-mono text-xs tabular-nums text-slate-200"
+            aria-label={`Call duration ${formatElapsed(elapsed)}`}
+          >
+            {formatElapsed(elapsed)}
+          </span>
+        )}
       </div>
 
-      {/* Stage: avatar + live captions */}
+      {/* Stage */}
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 pb-4">
-        <div
-          className={`relative flex h-40 w-40 items-center justify-center rounded-full text-7xl shadow-2xl transition-all duration-300 ${
-            phase === "recording"
-              ? "scale-110 bg-red-500/20 ring-4 ring-red-400/40"
-              : phase === "speaking"
-                ? "scale-105 bg-blue-500/20 ring-4 ring-blue-400/40"
-                : phase === "processing"
-                  ? "bg-amber-500/10 ring-4 ring-amber-400/30"
-                  : inCall
-                    ? "bg-green-500/10 ring-4 ring-green-400/30"
-                    : "bg-slate-700/50"
-          }`}
-        >
-          {phase === "recording" ? "🎙️" : phase === "speaking" ? "🗣️" : "🐣"}
+        <div className="relative flex h-40 w-40 items-center justify-center">
+          {/* Pulsing rings while actively in a call */}
+          {inCall && !muted && (
+            <span
+              aria-hidden
+              className={`absolute inset-0 animate-ping rounded-full ${
+                phase === "recording"
+                  ? "bg-red-400/15"
+                  : phase === "speaking"
+                    ? "bg-blue-400/15"
+                    : phase === "processing"
+                      ? "bg-amber-400/10"
+                      : "bg-green-400/15"
+              }`}
+            />
+          )}
+          <div
+            className={`relative flex h-40 w-40 items-center justify-center rounded-full text-7xl shadow-2xl transition-all duration-300 ${ringClass} ${
+              muted ? "opacity-60 grayscale" : ""
+            }`}
+          >
+            {muted ? "🔇" : avatar}
+          </div>
         </div>
 
         <p className="mt-5 text-center text-sm text-slate-300">
@@ -363,49 +730,93 @@ export default function AudioCall() {
             ? "Just start talking — Buddy will listen and reply automatically."
             : phase === "connecting"
               ? "Requesting microphone access…"
-              : muted
-                ? "Tap the microphone to unmute"
-                : phase === "recording"
-                  ? "Keep talking. Pause and Buddy will answer."
-                  : phase === "processing"
-                    ? "Thinking of a reply…"
+              : phase === "mic-denied"
+                ? "Buddy needs your microphone to hear you speak."
+                : muted
+                  ? "You're muted. Tap 🎤 to keep talking."
+                  : phase === "recording"
+                    ? "Keep talking. Pause and Buddy will answer."
+                    : phase === "processing"
+                      ? "Thinking of a reply…"
                     : phase === "speaking"
-                      ? "Buddy is speaking…"
+                      ? "Buddy is speaking — talk anytime to interrupt."
                       : phase === "ended"
                         ? "Call ended. Tap Start to call again."
                         : "Listening for your voice…"}
         </p>
 
-        {/* Live captions */}
-        <div className="mt-6 w-full max-w-md space-y-2">
-          {caption?.user && (
-            <div className="rounded-2xl bg-white/10 px-4 py-2.5 text-sm text-slate-100">
-              <span className="font-bold">🧒 You:</span> {caption.user}
-            </div>
-          )}
-          {caption?.buddy && (
-            <div className="rounded-2xl bg-blue-500/20 px-4 py-2.5 text-sm text-blue-50">
-              <span className="font-bold">🐣 Buddy:</span> {caption.buddy}
-            </div>
-          )}
+        {/* Live captions (last 2 exchanges, older fades) */}
+        <div
+          aria-live="polite"
+          className="mt-6 w-full max-w-md space-y-2"
+        >
+          {captions.map((c, i) => {
+            const older = i < captions.length - 1;
+            return (
+              <div
+                key={c.id}
+                className={`space-y-1.5 transition-opacity duration-500 ${
+                  older ? "opacity-50" : "opacity-100"
+                }`}
+              >
+                {c.user && (
+                  <div className="rounded-2xl bg-white/10 px-4 py-2 text-sm text-slate-100">
+                    <span className="font-bold">🧒 You:</span> {c.user}
+                  </div>
+                )}
+                {c.buddy && (
+                  <div className="rounded-2xl bg-blue-500/20 px-4 py-2 text-sm text-blue-50">
+                    <span className="font-bold">🐣 Buddy:</span> {c.buddy}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
-        {error && (
-          <p className="mt-4 max-w-md rounded-xl bg-red-500/20 px-3 py-2 text-center text-xs font-medium text-red-200">
-            ⚠️ {error}
+        {endingSoon && inCall && (
+          <p className="mt-4 rounded-xl bg-amber-400/15 px-3 py-2 text-center text-xs font-medium text-amber-200">
+            ⏰ This call will end soon (15-minute limit).
           </p>
+        )}
+
+        {phase === "mic-denied" && (
+          <div className="mt-5 flex flex-col items-center gap-3">
+            <p className="max-w-sm rounded-2xl bg-white/10 px-4 py-3 text-center text-sm text-slate-200">
+              I can&apos;t start the call without microphone permission.
+              Please allow microphone access in your browser settings, then tap
+              Try again.
+            </p>
+            <button
+              type="button"
+              onClick={startCall}
+              className="rounded-full bg-green-500 px-6 py-3 text-sm font-bold text-white shadow-lg transition-all hover:bg-green-600 active:scale-95"
+            >
+              🔄 Try again
+            </button>
+          </div>
         )}
       </div>
 
       {/* Controls */}
       <div className="flex shrink-0 items-center justify-center gap-5 px-4 pb-6">
-        {(phase === "idle" || phase === "ended") && (
+        {phase === "idle" && (
           <button
             type="button"
-            onClick={phase === "ended" ? restartCall : startCall}
+            onClick={startCall}
             className="flex items-center gap-2 rounded-full bg-green-500 px-8 py-4 text-base font-bold text-white shadow-lg transition-all hover:bg-green-600 active:scale-95"
           >
-            📞 {phase === "ended" ? "Call Again" : "Start Call"}
+            📞 Start Call
+          </button>
+        )}
+
+        {phase === "ended" && (
+          <button
+            type="button"
+            onClick={startCall}
+            className="flex items-center gap-2 rounded-full bg-green-500 px-8 py-4 text-base font-bold text-white shadow-lg transition-all hover:bg-green-600 active:scale-95"
+          >
+            📞 Call Again
           </button>
         )}
 
@@ -415,7 +826,7 @@ export default function AudioCall() {
               type="button"
               onClick={toggleMute}
               aria-pressed={muted}
-              aria-label={muted ? "Unmute" : "Mute"}
+              aria-label={muted ? "Unmute microphone (M)" : "Mute microphone (M)"}
               className={`flex h-16 w-16 items-center justify-center rounded-full text-2xl shadow-lg transition-all active:scale-95 ${
                 muted
                   ? "bg-red-500 text-white hover:bg-red-600"
@@ -427,7 +838,7 @@ export default function AudioCall() {
             <button
               type="button"
               onClick={endCall}
-              aria-label="End call"
+              aria-label="End call (Escape)"
               className="flex h-16 w-16 items-center justify-center rounded-full bg-red-500 text-2xl text-white shadow-lg transition-all hover:bg-red-600 active:scale-95"
             >
               📴
@@ -437,7 +848,7 @@ export default function AudioCall() {
       </div>
 
       <p className="shrink-0 pb-3 text-center text-[10px] text-slate-400/70">
-        Voice: automatic speech detection · no need to press and hold
+        Automatic speech detection · echo cancellation on · Esc to hang up
       </p>
     </div>
   );

@@ -27,7 +27,7 @@ export interface ExchangeInput {
   accent?: string;
 }
 
-export type SessionType = "chat" | "lesson";
+export type SessionType = "chat" | "lesson" | "call";
 
 /** Lesson-specific results stored alongside the session. */
 export interface SessionLessonFields {
@@ -42,16 +42,25 @@ export interface SessionLessonFields {
   timedOut?: boolean;
 }
 
+/** Voice-call-specific fields stored alongside the session. */
+export interface SessionCallFields {
+  title?: string;
+  endedAt?: number;
+  durationMs?: number;
+}
+
 /** Persisted session metadata (mirrors the session_meta DB table). */
-export interface SessionMeta extends SessionLessonFields {
+export interface SessionMeta extends SessionLessonFields, SessionCallFields {
   id: string;
   type: SessionType;
   /** Teacher accent used in this session, for the flag on history cards. */
   accent?: string;
+  /** When the call connected (calls only). */
+  startedAt?: number;
   updatedAt: number;
 }
 
-export interface Session extends SessionLessonFields {
+export interface Session extends SessionLessonFields, SessionCallFields {
   id: string;
   startedAt: number;
   messages: ChatMessage[];
@@ -226,15 +235,19 @@ const META_NUMBER_FIELDS = [
   "totalSteps",
   "starsEarned",
   "correctionsCount",
+  "startedAt",
+  "endedAt",
+  "durationMs",
 ] as const;
 
-const META_STRING_FIELDS = ["lessonId", "lessonTitle", "accent"] as const;
+const META_STRING_FIELDS = ["lessonId", "lessonTitle", "accent", "title"] as const;
 
 function normalizeSessionMeta(m: unknown): SessionMeta | null {
   if (m === null || typeof m !== "object") return null;
   const row = m as Record<string, unknown>;
   if (typeof row.id !== "string") return null;
-  if (row.type !== "chat" && row.type !== "lesson") return null;
+  if (row.type !== "chat" && row.type !== "lesson" && row.type !== "call")
+    return null;
   if (typeof row.updatedAt !== "number") return null;
 
   const meta: SessionMeta = {
@@ -298,6 +311,40 @@ function serverPostMeta(sessions: SessionMeta[]): void {
   });
 }
 
+/** POST meta during page unload (refresh / tab close), when fetch is killed. */
+function serverBeaconMeta(sessions: SessionMeta[]): void {
+  if (sessions.length === 0) return;
+  try {
+    navigator.sendBeacon?.(
+      "/api/sessions",
+      new Blob([JSON.stringify({ sessions })], {
+        type: "application/json",
+      })
+    );
+  } catch (err) {
+    console.error("🗄️ [store] Session meta beacon failed:", err);
+  }
+}
+
+/**
+ * Create or update a session's metadata (e.g. lesson start/results).
+ * Use transport "beacon" from a pagehide handler when a normal fetch would
+ * be torn down.
+ */
+export function saveSessionMeta(
+  input: SessionMeta,
+  transport: "fetch" | "beacon" = "fetch"
+): void {
+  const meta = normalizeSessionMeta(input);
+  if (!meta) return;
+  const current = getMetaSnapshot();
+  const others = current.filter((m) => m.id !== meta.id);
+  persistMeta([...others, meta]);
+  emit();
+  if (transport === "beacon") serverBeaconMeta([meta]);
+  else serverPostMeta([meta]);
+}
+
 function serverDeleteMeta(id?: string): void {
   const url = id
     ? `/api/sessions?id=${encodeURIComponent(id)}`
@@ -305,17 +352,6 @@ function serverDeleteMeta(id?: string): void {
   void fetch(url, { method: "DELETE" }).catch((err) => {
     console.error("🗄️ [store] Session meta delete failed:", err);
   });
-}
-
-/** Create or update a session's metadata (e.g. lesson start/results). */
-export function saveSessionMeta(input: SessionMeta): void {
-  const meta = normalizeSessionMeta(input);
-  if (!meta) return;
-  const current = getMetaSnapshot();
-  const others = current.filter((m) => m.id !== meta.id);
-  persistMeta([...others, meta]);
-  emit();
-  serverPostMeta([meta]);
 }
 
 function getPendingSnapshot(): boolean {
@@ -612,17 +648,140 @@ export function addExchange(input: ExchangeInput): {
   return { user, ai };
 }
 
-/** Error/notice bubble; stays in the current (or a fresh) session. */
-export function appendNotice(text: string): void {
+// ---------------------------------------------------------------------------
+// Voice-call sessions (typed "call"; mirror the lesson session pattern:
+// meta is persisted immediately on start, exchanges carry an explicit id,
+// meta is finalized when the call ends).
+// ---------------------------------------------------------------------------
+
+function callTitle(now: number): string {
+  const when = new Date(now).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `Voice Call · ${when}`;
+}
+
+/** Create + immediately persist a call session. Returns its id. */
+export function beginCallSession(accent?: string): string {
+  const id = uid();
+  const now = Date.now();
+  saveSessionMeta({
+    id,
+    type: "call",
+    title: callTitle(now),
+    startedAt: now,
+    ...(accent ? { accent } : {}),
+    updatedAt: now,
+  });
+  return id;
+}
+
+/** Append one user/ai exchange to an explicit call session. */
+export function addCallExchange(
+  sessionId: string,
+  input: ExchangeInput
+): { user: ChatMessage; ai: ChatMessage } {
+  const now = Date.now();
+  const user: ChatMessage = {
+    id: uid(),
+    sessionId,
+    createdAt: now,
+    role: "user",
+    text: input.transcript,
+  };
+  const ai: ChatMessage = {
+    id: uid(),
+    sessionId,
+    createdAt: now + 1,
+    role: "ai",
+    text: input.aiText,
+    praise: input.praise,
+    correction: input.correction,
+    newWord: input.newWord,
+    audioBase64: input.audioBase64,
+  };
+  persist([...getMessagesSnapshot(), user, ai]);
+  emit();
+  serverPost([user, ai]);
+
+  // Bump the call row, preserving its lifecycle fields.
+  const prev = getMetaSnapshot().find((m) => m.id === sessionId);
+  saveSessionMeta({
+    id: sessionId,
+    type: "call",
+    ...(prev?.title ? { title: prev.title } : { title: callTitle(now) }),
+    startedAt: prev?.startedAt ?? now,
+    ...(prev?.durationMs !== undefined ? { durationMs: prev.durationMs } : {}),
+    ...(input.accent || prev?.accent
+      ? { accent: input.accent ?? prev?.accent }
+      : {}),
+    updatedAt: now,
+  });
+  return { user, ai };
+}
+
+/**
+ * Close a call session with its final duration. Calls that produced zero
+ * exchanges are discarded entirely (History only lists calls with content);
+ * their placeholder meta row is removed locally and on the server.
+ */
+export function finalizeCallSession(
+  sessionId: string,
+  durationMs: number,
+  transport: "fetch" | "beacon" = "fetch"
+): void {
+  // A call counts as non-empty only if the child actually spoke at least once
+  // (system notices alone do not make a History entry).
+  const hasExchanges = getMessagesSnapshot().some(
+    (m) => m.sessionId === sessionId && m.role === "user"
+  );
+  if (!hasExchanges) {
+    // Removes any in-call notice messages too, so an empty call leaves no
+    // phantom session behind.
+    deleteSession(sessionId, transport);
+    return;
+  }
+  const now = Date.now();
+  const prev = getMetaSnapshot().find((m) => m.id === sessionId);
+  const firstAt =
+    getMessagesSnapshot().find(
+      (m) => m.sessionId === sessionId && m.role === "user"
+    )?.createdAt ?? now;
+  saveSessionMeta(
+    {
+      id: sessionId,
+      type: "call",
+      ...(prev?.title ? { title: prev.title } : { title: callTitle(firstAt) }),
+      startedAt: prev?.startedAt ?? firstAt,
+      endedAt: now,
+      durationMs,
+      ...(prev?.accent ? { accent: prev.accent } : {}),
+      updatedAt: now,
+    },
+    transport
+  );
+}
+
+/**
+ * Error/notice bubble; stays in the given session (e.g. an active call), or
+ * the current (or a fresh) session when no sessionId is provided.
+ */
+export function appendNotice(text: string, sessionId?: string): void {
   const messages = getMessagesSnapshot();
-  let sessionId = messages[messages.length - 1]?.sessionId;
-  if (!sessionId) {
-    if (getPendingSnapshot()) markPending(false);
-    sessionId = uid();
+  let sid = sessionId;
+  if (!sid) {
+    sid = messages[messages.length - 1]?.sessionId;
+    if (!sid) {
+      if (getPendingSnapshot()) markPending(false);
+      sid = uid();
+    }
   }
   const notice: ChatMessage = {
     id: uid(),
-    sessionId,
+    sessionId: sid,
     createdAt: Date.now(),
     role: "ai",
     text,
@@ -665,14 +824,40 @@ export function clearAllMessages(): void {
   serverDeleteMeta();
 }
 
-export function deleteSession(sessionId: string): void {
+/** DELETE meta during page unload (refresh / tab close), via beacon POST. */
+function serverBeaconDeleteMeta(id: string): void {
+  try {
+    navigator.sendBeacon?.(
+      "/api/sessions",
+      new Blob([JSON.stringify({ deletions: [id] })], {
+        type: "application/json",
+      })
+    );
+  } catch (err) {
+    console.error("🗄️ [store] Session meta beacon-delete failed:", err);
+  }
+}
+
+/**
+ * Delete every message + meta of a session locally and on the server.
+ * transport "beacon" (pagehide) only removes server meta; the beacon path
+ * is used for discarded empty calls, which have no server messages.
+ */
+export function deleteSession(
+  sessionId: string,
+  transport: "fetch" | "beacon" = "fetch"
+): void {
   persist(
     getMessagesSnapshot().filter((m) => m.sessionId !== sessionId)
   );
   persistMeta(getMetaSnapshot().filter((m) => m.id !== sessionId));
   emit();
-  serverDelete(sessionId);
-  serverDeleteMeta(sessionId);
+  if (transport === "beacon") {
+    serverBeaconDeleteMeta(sessionId);
+  } else {
+    serverDelete(sessionId);
+    serverDeleteMeta(sessionId);
+  }
 }
 
 /** Cache a lazily re-fetched voice clip back onto its message. */
@@ -727,6 +912,11 @@ export function selectSessions(messages: ChatMessage[]): Session[] {
           ? { timedOut: meta.timedOut }
           : {}),
         ...(meta?.accent !== undefined ? { accent: meta.accent } : {}),
+        ...(meta?.title !== undefined ? { title: meta.title } : {}),
+        ...(meta?.endedAt !== undefined ? { endedAt: meta.endedAt } : {}),
+        ...(meta?.durationMs !== undefined
+          ? { durationMs: meta.durationMs }
+          : {}),
       });
     }
   }

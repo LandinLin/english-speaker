@@ -15,7 +15,7 @@ function isSessionMeta(value: unknown): value is StoredSessionMeta {
   const m = value as Record<string, unknown>;
   return (
     typeof m.id === "string" &&
-    (m.type === "chat" || m.type === "lesson") &&
+    (m.type === "chat" || m.type === "lesson" || m.type === "call") &&
     typeof m.updatedAt === "number"
   );
 }
@@ -40,17 +40,30 @@ export async function POST(request: Request) {
       return Response.json({ error: "Not authenticated" }, { status: 401 });
     }
     const body: unknown = await request.json();
-    const raw =
+    const rawSessions =
       body && typeof body === "object"
         ? (body as { sessions?: unknown }).sessions
         : null;
-    if (!Array.isArray(raw)) {
-      return Response.json({ error: "sessions array required" }, { status: 400 });
-    }
-    const sessions = raw.filter(isSessionMeta);
+    // Beacon-fireable deletes for sessions discarded during page unload
+    // (sendBeacon can only POST), e.g. an empty voice call.
+    const rawDeletions =
+      body && typeof body === "object"
+        ? (body as { deletions?: unknown }).deletions
+        : null;
+    const sessions = Array.isArray(rawSessions)
+      ? rawSessions.filter(isSessionMeta)
+      : [];
     for (const meta of sessions) upsertSessionMeta(user.id, meta);
-    console.log(`🗄️ [sessions] Upserted ${sessions.length} session meta row(s)`);
-    return Response.json({ saved: sessions.length });
+    let deleted = 0;
+    if (Array.isArray(rawDeletions)) {
+      for (const id of rawDeletions) {
+        if (typeof id === "string") deleted += deleteSessionMeta(user.id, id);
+      }
+    }
+    console.log(
+      `🗄️ [sessions] Upserted ${sessions.length}, deleted ${deleted} session meta row(s)`
+    );
+    return Response.json({ saved: sessions.length, deleted });
   } catch (error) {
     console.error("🗄️ [sessions] POST failed:", error);
     return Response.json({ error: "Failed to save sessions" }, { status: 500 });

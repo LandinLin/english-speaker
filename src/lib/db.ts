@@ -31,7 +31,7 @@ export interface SessionUser {
 /** Session-level metadata. Sessions without a row default to type 'chat'. */
 export interface StoredSessionMeta {
   id: string;
-  type: "chat" | "lesson";
+  type: "chat" | "lesson" | "call";
   lessonId?: string;
   lessonTitle?: string;
   durationMinutes?: number;
@@ -43,6 +43,12 @@ export interface StoredSessionMeta {
   timedOut?: boolean;
   /** Teacher accent used in this session ("us" | "uk" | "au" | "in"). */
   accent?: string;
+  /** Human-readable session title (used for voice calls). */
+  title?: string;
+  /** Voice-call lifecycle timestamps / duration. */
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
   updatedAt: number;
 }
 
@@ -59,6 +65,10 @@ interface SessionMetaRow {
   corrections_count: number | null;
   timed_out: number | null;
   accent: string | null;
+  title: string | null;
+  started_at: number | null;
+  ended_at: number | null;
+  duration_ms: number | null;
   updated_at: number;
 }
 
@@ -97,10 +107,11 @@ function getDb(): Database.Database {
 //   v1 → v2: users + auth_sessions + messages.user_id
 //   v2 → v3: session_meta (chat/lesson typing + lesson results)
 //   v3 → v4: session_meta.accent (teacher voice used in the session)
+//   v4 → v5: session_meta call lifecycle columns (title/startedAt/endedAt/durationMs)
 // ---------------------------------------------------------------------------
 function migrate(database: Database.Database, dbPath: string): void {
   let userVersion = database.pragma("user_version", { simple: true }) as number;
-  if (userVersion >= 4) return;
+  if (userVersion >= 5) return;
 
   const backup = (targetVersion: number) => {
     if (!fs.existsSync(dbPath)) return;
@@ -209,6 +220,36 @@ function migrate(database: Database.Database, dbPath: string): void {
       console.log("✅ [db] Migration to v4 complete (session_meta.accent)");
     } catch (err) {
       console.error("❌ [db] v4 migration failed (rolled back):", err);
+      throw err;
+    }
+  }
+
+  // ── v4 → v5 ──────────────────────────────────────────────────────────
+  if (userVersion < 5) {
+    backup(5);
+    const v5 = database.transaction(() => {
+      const columns = database.prepare("PRAGMA table_info(session_meta)").all() as {
+        name: string;
+      }[];
+      const addColumn = (name: string, ddl: string) => {
+        if (!columns.some((col) => col.name === name)) {
+          database.exec(`ALTER TABLE session_meta ADD COLUMN ${ddl}`);
+        }
+      };
+      addColumn("title", "title TEXT");
+      addColumn("started_at", "started_at INTEGER");
+      addColumn("ended_at", "ended_at INTEGER");
+      addColumn("duration_ms", "duration_ms INTEGER");
+      database.pragma("user_version = 5");
+    });
+
+    try {
+      v5();
+      console.log(
+        "✅ [db] Migration to v5 complete (session_meta call lifecycle)"
+      );
+    } catch (err) {
+      console.error("❌ [db] v5 migration failed (rolled back):", err);
       throw err;
     }
   }
@@ -445,7 +486,12 @@ export function adoptOrphanMessages(userId: string): number {
 function rowToSessionMeta(row: SessionMetaRow): StoredSessionMeta {
   return {
     id: row.id,
-    type: row.type === "lesson" ? "lesson" : "chat",
+    type:
+      row.type === "lesson"
+        ? "lesson"
+        : row.type === "call"
+          ? "call"
+          : "chat",
     ...(row.lesson_id !== null ? { lessonId: row.lesson_id } : {}),
     ...(row.lesson_title !== null ? { lessonTitle: row.lesson_title } : {}),
     ...(row.duration_minutes !== null
@@ -461,6 +507,10 @@ function rowToSessionMeta(row: SessionMetaRow): StoredSessionMeta {
       : {}),
     ...(row.timed_out === 1 ? { timedOut: true } : {}),
     ...(row.accent !== null ? { accent: row.accent } : {}),
+    ...(row.title !== null ? { title: row.title } : {}),
+    ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
+    ...(row.ended_at !== null ? { endedAt: row.ended_at } : {}),
+    ...(row.duration_ms !== null ? { durationMs: row.duration_ms } : {}),
     updatedAt: row.updated_at,
   };
 }
@@ -471,7 +521,8 @@ export function listSessionMeta(userId: string): StoredSessionMeta[] {
     .prepare(
       `SELECT id, user_id, type, lesson_id, lesson_title, duration_minutes,
               completed_steps, total_steps, stars_earned, corrections_count,
-              timed_out, accent, updated_at
+              timed_out, accent, title, started_at, ended_at, duration_ms,
+              updated_at
        FROM session_meta WHERE user_id = ? ORDER BY updated_at ASC`
     )
     .all(userId) as SessionMetaRow[];
@@ -488,11 +539,11 @@ export function upsertSessionMeta(
       `INSERT INTO session_meta (
          id, user_id, type, lesson_id, lesson_title, duration_minutes,
          completed_steps, total_steps, stars_earned, corrections_count,
-         timed_out, accent, updated_at
+         timed_out, accent, title, started_at, ended_at, duration_ms, updated_at
        ) VALUES (
          @id, @userId, @type, @lessonId, @lessonTitle, @durationMinutes,
          @completedSteps, @totalSteps, @starsEarned, @correctionsCount,
-         @timedOut, @accent, @updatedAt
+         @timedOut, @accent, @title, @startedAt, @endedAt, @durationMs, @updatedAt
        )
        ON CONFLICT(id) DO UPDATE SET
          type = excluded.type,
@@ -505,12 +556,21 @@ export function upsertSessionMeta(
          corrections_count = excluded.corrections_count,
          timed_out = excluded.timed_out,
          accent = excluded.accent,
+         title = excluded.title,
+         started_at = excluded.started_at,
+         ended_at = excluded.ended_at,
+         duration_ms = excluded.duration_ms,
          updated_at = excluded.updated_at`
     )
     .run({
       id: meta.id,
       userId,
-      type: meta.type === "lesson" ? "lesson" : "chat",
+      type:
+        meta.type === "lesson"
+          ? "lesson"
+          : meta.type === "call"
+            ? "call"
+            : "chat",
       lessonId: meta.lessonId ?? null,
       lessonTitle: meta.lessonTitle ?? null,
       durationMinutes: meta.durationMinutes ?? null,
@@ -520,6 +580,10 @@ export function upsertSessionMeta(
       correctionsCount: meta.correctionsCount ?? null,
       timedOut: meta.timedOut ? 1 : 0,
       accent: meta.accent ?? null,
+      title: meta.title ?? null,
+      startedAt: meta.startedAt ?? null,
+      endedAt: meta.endedAt ?? null,
+      durationMs: meta.durationMs ?? null,
       updatedAt: meta.updatedAt,
     });
 }

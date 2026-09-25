@@ -14,11 +14,12 @@ import {
 } from "@/lib/messageStore";
 import { ACCENTS } from "@/lib/accentStore";
 
-type FilterId = "all" | "chats" | "lessons";
+type FilterId = "all" | "chats" | "calls" | "lessons";
 
 const FILTERS: { id: FilterId; label: string }[] = [
   { id: "all", label: "All" },
   { id: "chats", label: "💬 Chats" },
+  { id: "calls", label: "📞 Calls" },
   { id: "lessons", label: "📚 Lessons" },
 ];
 
@@ -52,6 +53,18 @@ function sessionPreview(session: Session): string {
   const firstUser = session.messages.find((m) => m.role === "user");
   const text = firstUser?.text.trim() || "Chat with English Buddy";
   return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
+/** mm:ss / h:mm:ss for a persisted voice-call duration. */
+function durationLabel(durationMs?: number): string | null {
+  if (typeof durationMs !== "number" || durationMs <= 0) return null;
+  const total = Math.round(durationMs / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 /** Flag emoji for the accent used in a session, if known. */
@@ -125,6 +138,7 @@ interface DayGroup {
 function SessionCard({ session }: { session: Session }) {
   const [expanded, setExpanded] = useState(false);
   const isLesson = session.type === "lesson";
+  const isCall = session.type === "call";
 
   const toggle = () => {
     if (expanded) stopPlayback();
@@ -133,14 +147,32 @@ function SessionCard({ session }: { session: Session }) {
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const what = isLesson ? "lesson" : "conversation";
+    const what = isLesson ? "lesson" : isCall ? "call" : "conversation";
     if (!window.confirm(`Delete this ${what}?`)) return;
     stopPlayback();
     deleteSession(session.id);
   };
 
+  const cardIcon = expanded
+    ? "📂"
+    : isCall
+      ? "📞"
+      : isLesson
+        ? "📚"
+        : "💬";
+  const cardTitle = isCall
+    ? session.title || "Voice Call"
+    : isLesson
+      ? session.lessonTitle || "English Lesson"
+      : sessionPreview(session);
+  const callDuration = durationLabel(session.durationMs);
+
   return (
-    <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+    <div
+      className={`overflow-hidden rounded-2xl border bg-white shadow-sm ${
+        isCall ? "border-green-200" : "border-gray-200"
+      }`}
+    >
       <div className="flex w-full items-center gap-3 px-4 py-3">
         <button
           type="button"
@@ -148,16 +180,17 @@ function SessionCard({ session }: { session: Session }) {
           aria-expanded={expanded}
           className="flex min-w-0 flex-1 items-center gap-3 text-left"
         >
-          <span className="text-lg">
-            {expanded ? "📂" : isLesson ? "📚" : "💬"}
-          </span>
+          <span className="text-lg">{cardIcon}</span>
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5">
               <span className="truncate text-sm font-medium text-gray-800">
-                {isLesson
-                  ? session.lessonTitle || "English Lesson"
-                  : sessionPreview(session)}
+                {cardTitle}
               </span>
+              {isCall && (
+                <span className="shrink-0 rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-green-700">
+                  Call
+                </span>
+              )}
               <AccentFlag session={session} />
             </span>
             <span className="mt-0.5 block text-xs">
@@ -165,8 +198,9 @@ function SessionCard({ session }: { session: Session }) {
                 <LessonStatus session={session} />
               ) : (
                 <span className="text-gray-400">
-                  {timeLabel(session.startedAt)} · {session.messages.length}{" "}
-                  messages
+                  {timeLabel(session.startedAt)}
+                  {isCall && callDuration ? ` · ${callDuration}` : ""} ·{" "}
+                  {session.messages.length} messages
                 </span>
               )}
             </span>
@@ -174,6 +208,11 @@ function SessionCard({ session }: { session: Session }) {
               <span className="mt-0.5 block text-xs text-gray-400">
                 {timeLabel(session.startedAt)} · {session.messages.length}{" "}
                 messages
+              </span>
+            )}
+            {isCall && (
+              <span className="mt-0.5 block truncate text-xs text-gray-400">
+                {sessionPreview(session)}
               </span>
             )}
           </span>
@@ -184,7 +223,13 @@ function SessionCard({ session }: { session: Session }) {
         <button
           type="button"
           onClick={handleDelete}
-          aria-label={isLesson ? "Delete lesson" : "Delete conversation"}
+          aria-label={
+            isLesson
+              ? "Delete lesson"
+              : isCall
+                ? "Delete call"
+                : "Delete conversation"
+          }
           className="rounded-full px-2 py-1 text-sm text-gray-400 hover:bg-red-50 hover:text-red-500"
         >
           🗑️
@@ -192,8 +237,18 @@ function SessionCard({ session }: { session: Session }) {
       </div>
 
       {expanded && (
-        <div className="border-t border-gray-100 bg-blue-50/40 px-3 py-4">
+        <div
+          className={`border-t px-3 py-4 ${
+            isCall ? "border-green-100 bg-green-50/40" : "border-gray-100 bg-blue-50/40"
+          }`}
+        >
           <div className="mx-auto flex max-w-xl flex-col gap-3">
+            {isCall && (
+              <p className="text-center text-[11px] font-medium uppercase tracking-wide text-green-600/80">
+                Voice call transcript · read-only
+                {callDuration ? ` · ${callDuration}` : ""}
+              </p>
+            )}
             <ChatTranscript messages={session.messages} />
           </div>
         </div>
@@ -212,7 +267,9 @@ function HistoryContent() {
       ? "lessons"
       : searchParams.get("filter") === "chats"
         ? "chats"
-        : "all";
+        : searchParams.get("filter") === "calls"
+          ? "calls"
+          : "all";
   const [filter, setFilter] = useState<FilterId>(initialFilter);
 
   const changeFilter = (id: FilterId) => {
@@ -221,19 +278,25 @@ function HistoryContent() {
     router.replace(id === "all" ? "/history" : `/history?filter=${id}`);
   };
 
-  const { groups, chatCount, lessonCount } = useMemo(() => {
+  const { groups, chatCount, callCount, lessonCount } = useMemo(() => {
     const all = selectSessions(messages).slice().reverse(); // newest first
     let chats = 0;
+    let calls = 0;
     let lessons = 0;
     for (const s of all) {
       if (s.type === "lesson") lessons += 1;
+      else if (s.type === "call") calls += 1;
       else chats += 1;
     }
     const filtered =
       filter === "all"
         ? all
         : all.filter((s) =>
-            filter === "lessons" ? s.type === "lesson" : s.type !== "lesson"
+            filter === "lessons"
+              ? s.type === "lesson"
+              : filter === "calls"
+                ? s.type === "call"
+                : s.type !== "lesson" && s.type !== "call"
           );
     const byDay = new Map<number, DayGroup>();
     for (const session of filtered) {
@@ -248,6 +311,7 @@ function HistoryContent() {
     return {
       groups: [...byDay.values()].sort((a, b) => b.key - a.key),
       chatCount: chats,
+      callCount: calls,
       lessonCount: lessons,
     };
   }, [messages, filter]);
@@ -260,8 +324,9 @@ function HistoryContent() {
   };
 
   const counts: Record<FilterId, number> = {
-    all: chatCount + lessonCount,
+    all: chatCount + callCount + lessonCount,
     chats: chatCount,
+    calls: callCount,
     lessons: lessonCount,
   };
 
@@ -326,10 +391,18 @@ function HistoryContent() {
                 ? "No lessons yet. Time to learn something fun!"
                 : filter === "chats"
                   ? "No chats yet."
-                  : "No conversations yet."}
+                  : filter === "calls"
+                    ? "No voice calls yet. Try calling English Buddy!"
+                    : "No conversations yet."}
             </p>
             <Link
-              href={filter === "lessons" ? "/lesson" : "/"}
+              href={
+                filter === "lessons"
+                  ? "/lesson"
+                  : filter === "calls"
+                    ? "/call"
+                    : "/"
+              }
               className="rounded-full bg-blue-500 px-5 py-2 text-sm font-medium text-white shadow hover:bg-blue-600"
             >
               {filter === "lessons" ? "Start a lesson 📚" : "Start speaking"}

@@ -6,10 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:vad": "tsc -p tsconfig.test.json && node --experimental-strip-types --no-warnings src/lib/vad.test.ts"
   },
   "dependencies": {
-    "@d-id/client-sdk": "^2.0.10",
     "axios": "^1.20.0",
     "better-sqlite3": "^13.0.3",
     "canvas-confetti": "^1.9.4",
