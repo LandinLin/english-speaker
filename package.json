@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:vad": "tsc -p tsconfig.test.json && node --experimental-strip-types --no-warnings src/lib/vad.test.ts"
+    "test:vad": "tsc -p tsconfig.test.json && node --experimental-strip-types --no-warnings src/lib/vad.test.ts",
+    "test:boundaries": "tsc -p tsconfig.test.json && node --experimental-strip-types --no-warnings src/lib/sentenceBoundaries.test.ts"
   },
   "dependencies": {
     "axios": "^1.20.0",

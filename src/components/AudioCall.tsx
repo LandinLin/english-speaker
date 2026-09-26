@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { VoiceActivityDetector, VAD_CONFIG } from "@/lib/vad";
+import { estimateSentenceBoundaries } from "@/lib/sentenceBoundaries";
 import { stopPlayback } from "@/lib/audioPlayer";
 import {
   addCallExchange,
@@ -72,6 +73,23 @@ const RECORDER_TIMESLICE_MS = 250;
  */
 const ENDPOINT_GRACE_MS = 500;
 
+/**
+ * While Buddy is speaking, the VAD's start-confirm window is raised to this
+ * value: speech must be sustained at least this long before onSpeechStart
+ * fires at all, so "hmm"s, coughs and background chatter are ignored
+ * entirely and Buddy keeps talking unaffected. Trade-off: the first
+ * fraction of a second of a genuine interruption's onset is clipped,
+ * because recording starts when the VAD confirms.
+ */
+const INTERRUPT_DEBOUNCE_MS = 500;
+
+/**
+ * A child talking continuously over Buddy for this long is not an
+ * interruption but a takeover: Buddy's audio is hard-cut and the captured
+ * speech is submitted immediately instead of waiting for a sentence end.
+ */
+const TAKEOVER_MS = 5_000;
+
 function pickRecorderMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   for (const candidate of RECORDER_CODECS) {
@@ -101,6 +119,9 @@ export default function AudioCall() {
   const [elapsed, setElapsed] = useState(0);
   const [endingSoon, setEndingSoon] = useState(false);
   const [captions, setCaptions] = useState<Caption[]>([]);
+  // True while a committed interruption is being captured and Buddy is
+  // still finishing his current sentence. Drives the queued-speech hint.
+  const [interruptPending, setInterruptPending] = useState(false);
 
   // phase mirrored in a ref so rAF-driven VAD callbacks never read stale state
   const phaseRef = useRef<Phase>("idle");
@@ -127,6 +148,17 @@ export default function AudioCall() {
   );
   const connectedAtRef = useRef<number | null>(null);
   const captionIdRef = useRef(0);
+  // ── Interruption-during-speech tracking ──
+  const interruptPendingRef = useRef(false);
+  // Wall-clock of the first loud frame of the current interruption attempt
+  // (basis for the takeover cap); 0 = none.
+  const interruptFirstDetectAtRef = useRef(0);
+  // Wall-clock of when the child last paused mid-interruption; 0 = talking.
+  const interruptEndedAtRef = useRef(0);
+  // Sentence end-times (ms) of the reply currently playing + next index.
+  const boundariesRef = useRef<number[]>([]);
+  const nextBoundaryIndexRef = useRef(0);
+  const boundaryRafRef = useRef<number | null>(null);
   // Persisted session row (type "call") for the currently active call.
   const callSessionIdRef = useRef<string | null>(null);
   const allMessagesRef = useRef(allMessages);
@@ -147,6 +179,36 @@ export default function AudioCall() {
 
   // ── Resource teardown (idempotent; safe for rapid start/end cycles) ──
 
+  /** Stop the sentence-boundary watcher for the currently playing reply. */
+  const stopBoundaryWatch = useCallback(() => {
+    if (boundaryRafRef.current !== null) {
+      cancelAnimationFrame(boundaryRafRef.current);
+      boundaryRafRef.current = null;
+    }
+  }, []);
+
+  /** Detach and release the AI reply audio element, if any. */
+  const releaseAiAudio = useCallback(() => {
+    const audio = aiAudioRef.current;
+    if (audio) {
+      audio.onloadedmetadata = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.src = "";
+      aiAudioRef.current = null;
+    }
+    stopBoundaryWatch();
+  }, [stopBoundaryWatch]);
+
+  /** Forget any pending/committed interruption state (teardown, mute). */
+  const clearInterruption = useCallback(() => {
+    interruptFirstDetectAtRef.current = 0;
+    interruptEndedAtRef.current = 0;
+    interruptPendingRef.current = false;
+    setInterruptPending(false);
+  }, []);
+
   const releaseResources = useCallback(() => {
     vadRef.current?.stop();
     vadRef.current = null;
@@ -155,6 +217,7 @@ export default function AudioCall() {
     VoiceActivityDetector.cancelPrime();
     abortRef.current?.abort();
     abortRef.current = null;
+    clearInterruption();
     if (endpointTimerRef.current !== null) {
       window.clearTimeout(endpointTimerRef.current);
       endpointTimerRef.current = null;
@@ -176,16 +239,9 @@ export default function AudioCall() {
     chunksRef.current = [];
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
-    const audio = aiAudioRef.current;
-    if (audio) {
-      audio.onended = null;
-      audio.onerror = null;
-      audio.pause();
-      audio.src = "";
-      aiAudioRef.current = null;
-    }
+    releaseAiAudio();
     stopPlayback();
-  }, []);
+  }, [clearInterruption, releaseAiAudio]);
 
   // Persist the call's final metadata (or discard it if no speech happened).
   // "beacon" transport survives refresh / tab close via navigator.sendBeacon.
@@ -287,14 +343,34 @@ export default function AudioCall() {
     chunksRef.current = [];
   }, [clearEndpointTimer]);
 
-  const startTurnRecording = useCallback(
+  // Schedule the endpoint-grace submission of the current turn.
+  const scheduleEndpointSubmit = useCallback(
     (session: number) => {
+      if (endpointTimerRef.current !== null) {
+        window.clearTimeout(endpointTimerRef.current);
+      }
+      endpointTimerRef.current = window.setTimeout(() => {
+        endpointTimerRef.current = null;
+        if (sessionRef.current !== session) return;
+        void submitTurnRef.current?.(session);
+      }, ENDPOINT_GRACE_MS);
+    },
+    []
+  );
+
+  const startTurnRecording = useCallback(
+    (session: number, opts?: { announce?: boolean }) => {
       if (sessionRef.current !== session) return;
+      // announce=false keeps the current phase (used while Buddy is still
+      // finishing a sentence): the recorder runs but the UI stays "speaking".
+      const announce = opts?.announce !== false;
       const existing = recorderRef.current;
       if (existing && existing.state === "recording") {
         // Same turn is already being captured (speech resumed while a
         // request was in flight, or inside the grace window) — keep it.
-        if (phaseRef.current !== "recording") setPhaseBoth("recording");
+        if (announce && phaseRef.current !== "recording") {
+          setPhaseBoth("recording");
+        }
         return;
       }
       const stream = streamRef.current;
@@ -314,12 +390,96 @@ export default function AudioCall() {
         // request, so a multi-sentence turn is always one complete clip.
         recorder.start(RECORDER_TIMESLICE_MS);
         recorderRef.current = recorder;
-        setPhaseBoth("recording");
+        if (announce) setPhaseBoth("recording");
       } catch (err) {
         console.error("📞 [call] Failed to start recorder:", err);
       }
     },
     [setPhaseBoth]
+  );
+
+  // ── Interruption while Buddy is speaking ───────────────────────────
+  //
+  // Speech during the reply NEVER cuts Buddy off mid-sentence. While Buddy
+  // talks, the VAD's confirm window is raised to INTERRUPT_DEBOUNCE_MS so
+  // short noises never surface; sustained speech commits an interruption
+  // (recording starts there, unannounced) and, when playback crosses the
+  // next sentence boundary, Buddy pauses and the child gets the floor.
+  // Continuous talk past TAKEOVER_MS is a takeover: hard cut + submit.
+
+  /**
+   * Buddy yields: stop the reply audio and give the child the floor.
+   * takeover=true submits the captured speech immediately; otherwise the
+   * normal endpoint flow submits it once the child pauses (or right away
+   * via the grace timer if the child already paused mid-interruption).
+   */
+  const finishInterruption = useCallback(
+    (session: number, takeover: boolean) => {
+      if (sessionRef.current !== session) return;
+      console.log(
+        takeover
+          ? "📞 [call] Takeover — cutting Buddy off"
+          : "📞 [call] Sentence boundary reached — Buddy yields"
+      );
+      releaseAiAudio();
+      // Back to normal detection sensitivity for the child's turn.
+      vadRef.current?.setStartConfirmMs(VAD_CONFIG.startConfirmMs);
+      interruptPendingRef.current = false;
+      setInterruptPending(false);
+      interruptFirstDetectAtRef.current = 0;
+      const alreadyPaused = interruptEndedAtRef.current > 0;
+      interruptEndedAtRef.current = 0;
+      // Keep recording the same interruption turn; only the floor changes.
+      setPhaseBoth("recording");
+      if (takeover) {
+        void submitTurnRef.current?.(session);
+      } else if (alreadyPaused) {
+        // The child already finished talking while Buddy wrapped up, so no
+        // further VAD endpoint will fire — schedule the submission here.
+        scheduleEndpointSubmit(session);
+      }
+    },
+    [releaseAiAudio, scheduleEndpointSubmit, setPhaseBoth]
+  );
+
+  /** rAF loop: pause Buddy at the next sentence end once an interruption
+   *  is queued; hard-cut on takeover. No-op behavior without interruption. */
+  const watchBoundaries = useCallback(
+    (audioEl: HTMLAudioElement, session: number) => {
+      const tick = () => {
+        if (sessionRef.current !== session || aiAudioRef.current !== audioEl) {
+          boundaryRafRef.current = null;
+          return;
+        }
+        if (interruptPendingRef.current) {
+          const firstAt = interruptFirstDetectAtRef.current;
+          if (firstAt > 0 && Date.now() - firstAt >= TAKEOVER_MS) {
+            finishInterruption(session, true);
+            return;
+          }
+          const bs = boundariesRef.current;
+          const idx = nextBoundaryIndexRef.current;
+          const nowMs = audioEl.currentTime * 1000;
+          if (idx < bs.length && nowMs >= bs[idx]) {
+            nextBoundaryIndexRef.current = idx + 1;
+            finishInterruption(session, false);
+            return;
+          }
+        } else {
+          // No interruption queued: just keep the boundary index in sync so a
+          // later interruption yields at the CURRENT sentence's end.
+          const bs = boundariesRef.current;
+          const nowMs = audioEl.currentTime * 1000;
+          let idx = nextBoundaryIndexRef.current;
+          while (idx < bs.length - 1 && nowMs >= bs[idx]) idx++;
+          nextBoundaryIndexRef.current = idx;
+        }
+        boundaryRafRef.current = requestAnimationFrame(tick);
+      };
+      stopBoundaryWatch();
+      boundaryRafRef.current = requestAnimationFrame(tick);
+    },
+    [finishInterruption, stopBoundaryWatch]
   );
 
   const submitTurn = useCallback(
@@ -419,9 +579,44 @@ export default function AudioCall() {
           );
           aiAudioRef.current = audioEl;
 
+          // Estimate where each sentence of the reply ends so an
+          // interruption pauses Buddy at a sentence boundary instead of
+          // cutting him off mid-word. Recomputed once metadata (duration)
+          // is available; falls back to a single end boundary until then.
+          const loadBoundaries = () => {
+            const durationMs = audioEl.duration * 1000;
+            boundariesRef.current =
+              Number.isFinite(durationMs) && durationMs > 0
+                ? estimateSentenceBoundaries(aiText, durationMs)
+                : [Number.POSITIVE_INFINITY];
+            nextBoundaryIndexRef.current = 0;
+          };
+          boundariesRef.current = [Number.POSITIVE_INFINITY];
+          nextBoundaryIndexRef.current = 0;
+          audioEl.onloadedmetadata = loadBoundaries;
+          if (audioEl.readyState >= 1) loadBoundaries();
+
           const resumeListening = () => {
             if (sessionRef.current !== session) return;
             if (aiAudioRef.current === audioEl) aiAudioRef.current = null;
+            stopBoundaryWatch();
+            // Back to normal detection sensitivity. A short noise made while
+            // Buddy spoke never committed, so there is nothing to drop.
+            vadRef.current?.setStartConfirmMs(VAD_CONFIG.startConfirmMs);
+            if (interruptPendingRef.current) {
+              // The reply ended (last boundary) with an interruption queued:
+              // hand the floor to the child; the endpoint flow submits it.
+              interruptPendingRef.current = false;
+              setInterruptPending(false);
+              interruptFirstDetectAtRef.current = 0;
+              const alreadyPaused = interruptEndedAtRef.current > 0;
+              interruptEndedAtRef.current = 0;
+              setPhaseBoth("recording");
+              if (alreadyPaused) {
+                scheduleEndpointSubmit(session);
+              }
+              return;
+            }
             setPhaseBoth("listening");
             // Guard the AI's own audio tail from being re-detected.
             vadRef.current?.beginCooldown(VAD_CONFIG.cooldownMs);
@@ -434,6 +629,11 @@ export default function AudioCall() {
           };
           try {
             await audioEl.play();
+            // While Buddy talks, only sustained speech may interrupt:
+            // raise the VAD's confirm window for this phase (restored in
+            // resumeListening / finishInterruption).
+            vadRef.current?.setStartConfirmMs(INTERRUPT_DEBOUNCE_MS);
+            watchBoundaries(audioEl, session);
           } catch (err) {
             console.warn("🔊 [call] AI playback could not start:", err);
             resumeListening();
@@ -460,36 +660,42 @@ export default function AudioCall() {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [accent, voice, setPhaseBoth, stopTurnRecorder]
+    [
+      accent,
+      voice,
+      setPhaseBoth,
+      stopTurnRecorder,
+      stopBoundaryWatch,
+      scheduleEndpointSubmit,
+      watchBoundaries,
+    ]
   );
   useEffect(() => {
     submitTurnRef.current = submitTurn;
   }, [submitTurn]);
 
-  // ── Barge-in: user talks over Buddy's REPLY (a genuinely new turn) ──
+  // ── Speech detected while Buddy's reply is playing ──────────────────
 
-  const bargeIn = useCallback(
+  /**
+   * Entry point for interruptions. The VAD only emits speech-start during
+   * Buddy's reply after INTERRUPT_DEBOUNCE_MS of sustained speech (its
+   * confirm window is raised for this phase), so reaching here already
+   * means a genuine interruption: commit immediately, capture the child
+   * (unannounced — Buddy keeps talking), and let the boundary watcher pick
+   * the yield point.
+   */
+  const onSpeechDuringSpeaking = useCallback(
     (session: number) => {
-      if (sessionRef.current !== session) return;
-      console.log("📞 [call] Barge-in detected — stopping Buddy");
-      // 1) Kill AI audio immediately (detach onended so it can't reset state).
-      const audioEl = aiAudioRef.current;
-      if (audioEl) {
-        audioEl.onended = null;
-        audioEl.onerror = null;
-        audioEl.pause();
-        audioEl.src = "";
-        aiAudioRef.current = null;
+      if (!interruptPendingRef.current) {
+        interruptPendingRef.current = true;
+        setInterruptPending(true);
+        interruptFirstDetectAtRef.current = Date.now();
       }
-      // 2) Cancel any just-returning reply playback setup.
-      abortRef.current?.abort();
-      abortRef.current = null;
-      // 3) The previous turn is complete — retire its recorder, then start
-      // capturing the new utterance as a fresh turn.
-      stopTurnRecorder();
-      startTurnRecording(session);
+      // New or resumed committed speech: keep capturing the same turn.
+      interruptEndedAtRef.current = 0;
+      startTurnRecording(session, { announce: false });
     },
-    [startTurnRecording, stopTurnRecorder]
+    [startTurnRecording]
   );
 
   // ── VAD callbacks (created per session inside startCall) ────────────
@@ -504,6 +710,7 @@ export default function AudioCall() {
     setEndingSoon(false);
     setElapsed(0);
     setCaptions([]);
+    clearInterruption();
     setPhaseBoth("connecting");
 
     // Create the VAD's AudioContext synchronously, inside this click task:
@@ -569,11 +776,24 @@ export default function AudioCall() {
           abortRef.current = null;
           startTurnRecording(session); // live recorder is kept
         } else if (p === "speaking") {
-          bargeIn(session);
+          // Buddy is mid-reply: never cut him off mid-sentence. Debounce
+          // noise, capture the child, yield at the next sentence boundary.
+          onSpeechDuringSpeaking(session);
         }
       },
       onSpeechEnd: (reason) => {
         if (sessionRef.current !== session || mutedRef.current) return;
+        if (phaseRef.current === "speaking") {
+          if (interruptPendingRef.current) {
+            // Committed interruption: child paused while Buddy wraps up.
+            // finishInterruption will schedule the submission.
+            interruptEndedAtRef.current = Date.now();
+          }
+          // No pending interruption: unreachable with the raised confirm
+          // window (a confirmed start always commits) — the noise was never
+          // recorded and Buddy keeps speaking unaffected.
+          return;
+        }
         if (phaseRef.current !== "recording") return;
         if (reason === "cancel") {
           // Sub-minimum click/pop: discard the recording, stay in call.
@@ -624,9 +844,10 @@ export default function AudioCall() {
     setPhaseBoth("listening");
   }, [
     startTurnRecording,
-    bargeIn,
     stopTurnRecorder,
     clearEndpointTimer,
+    clearInterruption,
+    onSpeechDuringSpeaking,
     releaseResources,
     setPhaseBoth,
   ]);
@@ -657,7 +878,9 @@ export default function AudioCall() {
     const vad = vadRef.current;
     if (next) {
       vad?.setEnabled(false);
-      // Discard anything recorded so far — do NOT submit.
+      // Discard anything recorded so far — do NOT submit. A queued
+      // interruption is dropped too: muted means the child isn't talking.
+      clearInterruption();
       stopTurnRecorder();
       if (phaseRef.current === "recording") setPhaseBoth("listening");
     } else {
@@ -665,7 +888,7 @@ export default function AudioCall() {
       // Ignore the sound of tapping unmute.
       vad?.beginCooldown(150);
     }
-  }, [setPhaseBoth, stopTurnRecorder]);
+  }, [setPhaseBoth, stopTurnRecorder, clearInterruption]);
 
   // Keyboard: Esc ends, M mutes (only while in a call).
   useEffect(() => {
@@ -851,6 +1074,15 @@ export default function AudioCall() {
               </div>
             );
           })}
+        </div>
+
+        {/* Queued-interruption hint: fixed height so nothing shifts around. */}
+        <div aria-live="polite" className="mt-3 flex h-7 items-center">
+          {interruptPending && phase === "speaking" && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-400/15 px-3 py-1 text-xs font-medium text-blue-200">
+              🎤 I&apos;ll answer after this sentence…
+            </span>
+          )}
         </div>
 
         {endingSoon && inCall && (

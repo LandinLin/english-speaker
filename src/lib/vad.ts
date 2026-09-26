@@ -144,6 +144,8 @@ export class VoiceActivityDetector {
   private lastNow = 0;
   private cooldownUntil = 0;
   private lastLevel = 0;
+  // Effective start-confirm window (VAD_CONFIG.startConfirmMs unless raised).
+  private startConfirmMs: number = VAD_CONFIG.startConfirmMs;
 
   constructor(callbacks: VadCallbacks) {
     this.callbacks = callbacks;
@@ -260,6 +262,16 @@ export class VoiceActivityDetector {
     }
   }
 
+  /**
+   * Raise/restore the start-confirm window. Used by Voice Call while Buddy's
+   * reply plays: a long window (e.g. 500ms) makes coughs and "hmm"s too short
+   * to ever emit onSpeechStart, so they are ignored entirely.
+   */
+  setStartConfirmMs(ms: number): void {
+    this.startConfirmMs = ms;
+    this.loudSince = 0; // re-confirm under the new window
+  }
+
   /** Stop monitoring and release audio resources. */
   stop(): void {
     this.running = false;
@@ -297,6 +309,7 @@ export class VoiceActivityDetector {
     this.lastNow = now;
     this.cooldownUntil = 0;
     this.lastLevel = 0;
+    this.startConfirmMs = VAD_CONFIG.startConfirmMs;
   }
 
   private sampleFrame(): void {
@@ -369,7 +382,7 @@ export class VoiceActivityDetector {
 
       if (rms > speechThreshold) {
         if (this.loudSince === 0) this.loudSince = now;
-        if (now - this.loudSince >= VAD_CONFIG.startConfirmMs) {
+        if (now - this.loudSince >= this.startConfirmMs) {
           this.state = "speaking";
           this.speechStartedAt = this.loudSince;
           // Include the confirmation burst itself as voiced time.

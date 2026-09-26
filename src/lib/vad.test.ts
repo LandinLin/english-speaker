@@ -127,3 +127,28 @@ test("soft voice just above the absolute floor still triggers", () => {
     "soft-spoken user is detected"
   );
 });
+
+test("raised startConfirmMs ignores short noise bursts (Buddy speaking)", () => {
+  const { vad, events } = makeVad();
+
+  feed(vad, 0.001, 0, 2000); // quiet room baseline
+  vad.setStartConfirmMs(500); // Buddy's reply starts playing
+
+  // A 300ms "hmm" never emits any event.
+  feed(vad, 0.1, 2000, 2300);
+  feed(vad, 0.001, 2350, 3000);
+  assert.equal(events.length, 0, "short noise is fully ignored");
+
+  // A genuine 600ms interruption still confirms and ends normally.
+  feed(vad, 0.1, 3000, 3600);
+  feed(vad, 0.001, 3650, 4600);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].type, "start");
+  assert.equal(events[1].type, "end");
+
+  // Restoring the default re-enables the snappy 120ms confirmation.
+  vad.setStartConfirmMs(VAD_CONFIG.startConfirmMs);
+  feed(vad, 0.1, 5000, 5250); // 250ms burst
+  feed(vad, 0.001, 5300, 6300);
+  assert.equal(events.length, 4, "default window detects short speech again");
+});
