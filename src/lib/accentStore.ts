@@ -143,6 +143,8 @@ export function setAccentPreference(pref: Partial<AccentPreference>): void {
     accent: isAccentId(pref.accent) ? pref.accent : current.accent,
     voice: isVoiceType(pref.voice) ? pref.voice : current.voice,
   };
+
+  console.log("setAccentPreference", next);
   if (next.accent === current.accent && next.voice === current.voice) return;
   current = next;
   try {

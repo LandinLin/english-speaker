@@ -1,0 +1,43 @@
+# English Buddy — self-hosted stack (HK VPS, no ICP filing needed).
+#
+# Prerequisites on the server:
+#   - Docker Engine + Docker Compose plugin
+#   - .env.production next to this file (all server secrets + SITE_DOMAIN
+#     + ACME_EMAIL + the two NEXT_PUBLIC_DID_* build args)
+#   - DNS A record for $SITE_DOMAIN pointing at this server
+#
+# First/every deploy:  bash scripts/deploy.sh
+# Caddy provisions a real Let's Encrypt certificate automatically, which
+# is required: microphone (getUserMedia) and PWA install need HTTPS.
+
+services:
+  web:
+    build:
+      context: .
+      args:
+        # Client-side public keys — inlined at build time.
+        NEXT_PUBLIC_DID_CLIENT_KEY: ${NEXT_PUBLIC_DID_CLIENT_KEY:?set in .env.production}
+        NEXT_PUBLIC_DID_AGENT_ID: ${NEXT_PUBLIC_DID_AGENT_ID:?set in .env.production}
+    image: english-buddy:latest
+    restart: unless-stopped
+    env_file: .env.production
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    env_file: .env.production
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

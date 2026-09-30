@@ -435,7 +435,7 @@ export default function HistoryPage() {
     <Suspense
       fallback={
         <main className="h-full overflow-y-auto">
-          <h1 className="text-on-bg px-4 pt-4 text-xl font-bold">📜 History</h1>
+          <h1 className="text-on-bg px-4 pt-4 text-xl font-bold">📜 History1</h1>
         </main>
       }
     >

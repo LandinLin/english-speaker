@@ -1,0 +1,11 @@
+{
+	# Email used by Let's Encrypt for certificate expiry notices.
+	email {$ACME_EMAIL}
+}
+
+{$SITE_DOMAIN} {
+	encode gzip zstd
+
+	# Next.js standalone app server.
+	reverse_proxy web:3000
+}
